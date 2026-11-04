@@ -11,9 +11,9 @@
 | Data Source | `matrix_eval.json` (Evaluation) / `repeats_summary.json` (Repeatability) / `rag_ab_summary.json` (RAG对照) / `extra_datasets.json` (Non-matrix Experiments) |
 | Related | [09 Fault Matrix Report](09-matrix-report.md) · [06 Silent Failure Retrospective](06-pitfalls.md) |
 
-## 0. Clarify: What Does This Project Prove
+## 0. What the Project Measures
 
-In one sentence: **"The chain from injecting a fault to automatically identifying the root cause and executing self-healing is not just about installing components, but every step has measurable numbers that are cross-validated."**
+The project covers the chain from fault injection to root-cause analysis and self-healing. It does not stop at installing components: each stage produces measurable results that are cross-checked against other observations.
 
 The three charts on the chart page correspond to **three different issues** in this chain:
 
@@ -25,7 +25,7 @@ The three charts on the chart page correspond to **three different issues** in t
 | ④ Non-Matrix Experiments | What other datasets are not included in the matrix? | Do Not Miss Historical Assets |
 
 Currently, there are **9 experiments** on the chart: F01–F07 (single fault/network/stress types) + **F13 Cascading** + **F14 Multiple Root Causes**.
-Overall: **26 rounds are testable, with a top-1 hit rate of 26/26 (100%).**
+Across all runs: **26 rounds are testable, with a top-1 hit rate of 26/26 (100%).**
 
 ## 1. Figure 1 "Denoising Rate (Mean ± Standard Deviation) for Each Experiment" —— Sees if "Analysis Layer Can Be Used"
 
@@ -57,7 +57,7 @@ Each bar represents a different fault scenario. The differences between bars ref
 
 ## 2. Figure 2 "Composition of Repetitive Rounds" —— Sees if the Conclusion is Stable
 
-**Why is this figure important**: A single successful run of the experiment might just be a matter of **good luck**.
+**Why this figure matters**: A single successful run may be accidental; repeated runs show whether the result is stable.
 Project F06 had once "passed" a single run (producing 2 alerts), but after 3 consecutive runs, all three rounds had **zero alerts** — this is the pitfall recorded by P50.
 
 ### How to Read
@@ -68,7 +68,7 @@ Project F06 had once "passed" a single run (producing 2 alerts), but after 3 con
 | **Red Segment** | The number of rounds in which the experiment **generated no alerts** (non-evaluatable) |
 | **Right-side Text** | `Evaluatable n / No Alert m` |
 
-**Key Differentiation**: The red segment is **not "evaluation script errors"**, but rather "no input data for this round".
+**How to read the colors**: The red segment means there was no input data for that round. It does **not** indicate an evaluation-script error.
 The meanings are entirely different: the former is an engineering issue, while the latter is an **experimental design issue** (fault intensity or duration is insufficient to trigger an alert).
 
 ### The Most Worthwhile Line on the Figure: F06
@@ -87,7 +87,7 @@ So, this figure can instantly show "which experiment is truly reproducible and w
 
 ## 3. Figure 3 "RAG Comparison" —— It Shows a "Negative Result"
 
-**Why Keep a "No Improvement" Chart**: Negative results are conclusions too, and they determine where to invest next.
+**Why a "No Improvement" chart is included**: Negative results still show where additional work is needed.
 
 ### How to Read
 
@@ -112,7 +112,7 @@ To demonstrate the value of RAG, a **more challenging benchmark** is needed: ①
 
 > **Update**: F13/F14 originally only had a single old dataset from 11-02 (with a duration of 180s and old rules). On 2026-11-04, they were **merged into the fault matrix and rerun 3 times each**, now appearing in Figures ① / ②, while the "non-matrix experiments" only retain historical datasets that have been replaced by new data (marked as [Historical: Replaced by New Data]).
 
-**Why are these two experiments the most important**: They test the hardest part of denoising — **merging what should be merged and not merging what should not be merged**.
+**What these two experiments add**: They check the most error-prone part of denoising: merging related alerts without merging independent faults.
 
 | Experiment | Fault Combination | True Root Causes | Examined Point |
 |---|---|---|---|
@@ -135,12 +135,12 @@ Similar to Figure ①, but **without error bars** (single run). Focus on two poi
 
 **How to Interpret These Numbers**:
 
-- **Over-merge = 0%** is the most critical column here — it means **no two independent faults were merged into one cluster** (which would cause on-call personnel to miss one fault).
+- **Over-merge = 0%** is the key column here: no two independent faults were merged into one cluster, which would hide one of them from on-call engineers.
 - **Purity 50% / 82.8% does not indicate poor performance**: In multi-root cause scenarios, multiple candidates can naturally exist within a cluster (e.g., `{payment, redis, postgres}` are all true root causes). This is the口径 correction recorded in P16 — **the root causes in a cluster are the candidate set, not a single answer**.
 - **Candidate P/R = 1.00/1.00** is the criterion for "no false positives and no false negatives".
 - The denoising rate of F13 fluctuates significantly (±11.3%) while F14 is very stable (±2.1%): F13 contains **network delay** (alert count fluctuates with delay), while F14 consists of three **pod failures** (alert count is stable).
 
-> In short: **Focus on multi-root cause experiments, not purity, but on 'over-merge rate + candidate recall rate'**.
+> For multi-root incidents, read the over-merge rate and candidate recall together; cluster purity alone is not enough.
 
 ## 5. One-Page Quick Reference: Four Metrics and Their Purposes
 
@@ -152,4 +152,4 @@ Similar to Figure ①, but **without error bars** (single run). Focus on two poi
 | **Candidate Precision / Recall** | Whether the candidate set is correct | Whether **root causes are missed or wrongly attributed** | Recall <1 means missing root causes; Precision <1 means false positives |
 | **Top-1 / MRR** | How accurate the first-ranked candidate is | **Sorting quality** | Low → Self-healing may target the wrong component |
 
-> One-sentence criteria: **Denoising rate looks at "how much less to see," purity and over-merge look at "whether merging is correct," candidate P/R looks at "whether root causes are missed," and Top-1 looks at "who to check first."** Reporting denoising rate alone is not enough — that was the lesson learned by P16 (the root cause of a cluster is the candidate set, not a single answer).
+> Read these values together: denoising rate shows how many alerts were removed; purity and over-merge rate show whether the merge was correct; candidate P/R shows whether any root cause was missed; Top-1 shows which service is checked first. Reporting the denoising rate alone is not enough. P16 showed that a cluster can contain a candidate set rather than one answer.

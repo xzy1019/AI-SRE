@@ -2,9 +2,8 @@
 
 [中文](README.md) | **English**
 
-> A complete closed loop from **chaos injection → automated root-cause analysis → self-healing execution**.
-> The point is not "the components are installed" — it is that **every step has a measured number,
-> and the numbers were cross-checked**.
+> The project covers **chaos injection, root-cause analysis, and self-healing execution**.
+> It does not stop at installing components: **each stage has a measured result, and the results are cross-checked**.
 
 [![K8s](https://img.shields.io/badge/Kubernetes-v1.31-326CE5)](https://kubernetes.io/)
 [![Chaos Mesh](https://img.shields.io/badge/Chaos%20Mesh-v2.8.7-ff6b6b)](https://chaos-mesh.org/)
@@ -17,7 +16,7 @@
 - [The problem this solves](#the-problem-this-solves)
 - [Architecture](#architecture)
 - [Measured results](#measured-results)
-- [Five highlights](#five-highlights)
+- [Design choices](#design-choices)
 - [Quick start](#quick-start)
 - [Repository layout](#repository-layout)
 - [Documentation](#documentation)
@@ -116,7 +115,7 @@ flowchart TB
 
 ---
 
-## Five highlights
+## Design choices
 
 ### 1. Denoising reports a **set of metrics**, not a single number
 
@@ -259,8 +258,7 @@ This project has **50** such real records (`docs/06-pitfalls.md`), each with
 | **P45** | Edge-scoped alerts carry no attribution | Denoising can only *guess* caller vs callee, and picked the wrong Top-1 |
 | **P50** | Passing once ≠ reproducible | F06 produced **zero alerts in 3 consecutive runs** — only repetition could expose it |
 
-> In one sentence: **the problems found are worth more than the flows that worked.**
-> A good share of the 50 were moments where an opposite conclusion was one step away.
+> **Many of the 50 records were moments where the conclusion was one step away from being wrong.** They are worth keeping alongside the flows that worked.
 
 ---
 

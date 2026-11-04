@@ -22,7 +22,7 @@
 | 排查方向 | 看日志、看事件 | **没有日志，因为没人知道它坏了** |
 | 典型代价 | 一次重启 | 错误的数据/结论被下游一路复用 |
 
-本项目第 0–1 周共踩到 8 个，全部属于这一类。逐个记录，是为了以后不再犯，也是为了面试能讲清。
+本项目第 0–1 周共遇到 8 个这类问题。逐个记录，是为了避免复发，也便于公开复盘。
 
 ### 判据：四条"正常"的错觉
 
@@ -37,7 +37,7 @@
 
 ## 1. 总览（按危害排序）
 
-| # | 问题 | 一句话 | 危害等级 |
+| # | 问题 | 摘要 | 危害等级 |
 |---|---|---|---|
 | P01 | 告警规则从未加载 | `rule_files` 路径与挂载点不一致，8 条规则**一条都没生效** | ★★★★★ 沉默 |
 | P02 | 埋点直方图二次累积 | 真实 10ms 的 P95 被算成 **7.5s**，延迟告警永久误报 | ★★★★★ 污染数据 |
@@ -318,7 +318,7 @@ Warning Unhealthy: Liveness probe failed:
 - [ ] **新增告警规则后，同步扩展降噪/RCA 的候选推断 *和* 证据分类** —— 两处都要改，只改一处等于没改（P43）
 - [ ] **连续实验间改 `ground_truth` 标签值 = 换序列**，旧序列会在 `rate` 窗口内继续带着旧 GT 出现（P44）
 
-## 10. 面试/写作可用提炼
+## 10. 可用提炼
 
 1. **"配置写了 ≠ 生效，文件生成了 ≠ 数据可用，进程起来了 ≠ 功能正常。"** —— 一条判据串起 8 个问题。
 2. **沉默故障最贵的地方在于"它在给下游喂错数据"**：P02/P03 会让后面的降噪与 RCA 学到噪声。
@@ -328,7 +328,7 @@ Warning Unhealthy: Liveness probe failed:
 
 | 版本 | 日期 | 修改内容 |
 |---|---|---|
-| v1.0 | 2026-11-01 | 建立沉默故障复盘：8 个问题的现象/根因/定位证据/修法/自查命令、预防清单、面试提炼 |
+| v1.0 | 2026-11-01 | 建立沉默故障复盘：8 个问题的现象/根因/定位证据/修法/自查命令、预防清单和提炼 |
 | v1.1 | 2026-11-02 | 追加 **P31 批量实验告警窗口未排空（方法学污染）**、**P32 matrix.jsonl 缺换行**；问题数 30 → 32 |
 | v1.2 | 2026-11-02 | 追加 **P33 数据集导出窗口越过 T0 导致跨轮污染**；问题数 32 → 33 |
 | v1.3 | 2026-11-02 | 追加 **P34 导出抢在 Alertmanager 投递之前 → 空数据集**；问题数 33 → 34 |
@@ -397,7 +397,7 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 
 > **这三个版本都不是"写错了"，而是"定义没想清楚"**。指标口径一旦定错，
 > 后面所有结论都会偏——所以第一版就在 `_verify/fixture-F13` 合成数据上做对照，
-> 再上真实数据。这是本仓库里最值得面试讲的一段。
+> 再上真实数据。这段过程适合整理成公开复盘。
 
 ### P13 重复告警参与"投票"会把根因投歪
 
@@ -634,7 +634,7 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 |---|---|
 | **表面正常** | `cat /opt/aisre/datasets/matrix.jsonl` 能看到 6 条完整记录、字段齐全，肉眼像是在正常追加 |
 | **实际故障** | `wc -l` = **0**；文件内容其实是 `{...}{...}{...}` **直接拼接**，任何按行解析都会在第一条之后失败 |
-| **根因** | 写记录用的是 `json.dump(obj, fh)` —— **它不会自动补换行**；循环里又写了 `print("", end="")`（往 stdout 打空串，与文件无关），换行从来没写进去 |
+| **根因** | 写记录时使用 `json.dump(obj, fh)` —— **它不会自动补换行**；循环里又写了 `print("", end="")`（往 stdout 打空串，与文件无关），换行从来没写进去 |
 | **修法** | 显式 `fh.write("\n")`；已有文件用 `json.JSONDecoder().raw_decode()` 循环切分后**重写为一行一条** |
 | **实测** | 修复后 `wc -l matrix.jsonl` = 6，`[json.loads(l) for l in open(...)]` 解析出 `['F01'…'F06']` |
 | **顺带价值** | 这是“**文件生成了 ≠ 数据可用**”（与 P03 同族）的又一例：`.jsonl` 后缀并不保证它真是 JSONL，**必须有解析校验** |
@@ -666,7 +666,7 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 | **排查口诀** | “**Prometheus 里有 ≠ ingest 里有 ≠ 数据集里有**”——三者的时延依次递增，跨系统取数必须等到达 |
 
 > 与 P03（文件有内容但不可用）、P31/P33（窗口串味）同族：**"采集到"这件事本身需要被验证**，
-> 而不是假定"我查的时候它就该在"。
+> 不能假定检查时对象一定还在。
 
 ### P35 导出窗口停在"首次 firing" → 指标曲线看不到故障演化与恢复
 
@@ -687,9 +687,9 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 | 项 | 内容 |
 |---|---|
 | **表面正常** | 仓库里同时有 `manifests/observability/_prometheus.yml`（下划线开头，注释写"人读副本"）和 `03-prometheus.yaml` 里内嵌的 ConfigMap。名字与注释都暗示"两份是一回事" |
-| **实际故障** | 我写了渲染脚本，准备以后"以人读文件为唯一事实来源"自动生成部署清单。**渲染完做差异比对时发现**：人读副本里的 `relabel_configs` 缩进是错的（列表项 6 空格、属性 4 空格），`namespaces` 还挂在 `kubernetes_sd_configs` 外面 —— 按它渲染，**正在工作的抓取配置会被换成一份非法配置** |
+| **实际故障** | 项目中曾编写渲染脚本，准备以人读文件作为唯一事实来源自动生成部署清单。**渲染完做差异比对时发现**：人读副本里的 `relabel_configs` 缩进是错的（列表项 6 空格、属性 4 空格），`namespaces` 还挂在 `kubernetes_sd_configs` 外面 —— 按它渲染，**正在工作的抓取配置会被换成一份非法配置** |
 | **根因** | 两份文件**手工同步**过一段时间，只有部署那份被改对了，人读那份停留在早期版本。**没有任何机制保证两者一致**，注释还让人以为它们一致 |
-| **为什么危险** | 这是"改配置"类操作里最隐蔽的一种：**你越"规范化""自动化"，越容易把自己那份陈旧副本推上去，覆盖掉线上唯一正确的东西**。而且 `kubectl apply` 会返回 `configured`，看起来一切正常 |
+| **为什么危险** | 这是"改配置"类操作里最隐蔽的一种：操作者越相信“规范化”“自动化”，越容易把陈旧副本推上去，覆盖掉正在使用的正确配置。而且 `kubectl apply` 会返回 `configured`，看起来一切正常 |
 | **修法** | ① **以运行中的 ConfigMap 为新基准**（`kubectl get cm -o jsonpath` 导出），而不是以仓库副本为基准；② 重建人读文件后再渲染；③ **渲染产物必须与"运行版"做逐行 diff**，只允许出现预期新增行；④ 落地 `scripts/31-sync-prometheus-config.py`（含 `--check`）让两者从此单向生成 |
 | **实测** | diff 结果：`prometheus.yml` 只多出 cAdvisor job、`rules.yml` 新增 62 行 / **删除 0 行**，符合预期后才部署；部署后 21 条规则全部加载 |
 
@@ -702,7 +702,9 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 |---|---|
 | **表面正常** | 用 PowerShell `Set-Content` 生成的 `32-apply-prometheus-config.sh`，内容看着完全正常，缩进、`if/fi` 都成对 |
 | **实际故障** | 推到节点上 `bash -n` 直接报 `line 106: syntax error: unexpected end of file` —— 明明结构是完整的 |
-| **根因** | 文件**只有最后一行是 CRLF**（前面都是 LF，因为大部分内容是从别处复制的），最后一行 `fi` 里的 `` 被当成命令的一部分，于是 bash 认为 `if` 少了个 `fi`，一路找到文件尾报"意外结束"。**只差一个字节，报错位置却在 100 行之外** |
+| **根因** | 文件**只有最后一行是 CRLF**（前面都是 LF，因为大部分内容是从别处复制的），最后一行 `fi
+` 里的 `
+` 被当成命令的一部分，于是 bash 认为 `if` 少了个 `fi`，一路找到文件尾报"意外结束"。**只差一个字节，报错位置却在 100 行之外** |
 | **识别信号** | `bash -n` 报"unexpected end of file"，但人肉看结构完整 → **先查行尾**：`python3 -c "print(open('x.sh','rb').read().count(b'\r\n'))"` |
 | **修法** | 统一转 LF（`raw.replace(b'\r\n', b'\n')`）并去掉 BOM；本项目所有 `.sh` 落盘前都做一次行尾归一 |
 | **与 P36 的关系** | 两个都是"**文件本地产物 ≠ 目标环境要求**"：一个是缩进/内容漂移，一个是行尾编码。**跨平台/跨环境交付文本文件，天然需要一次校验步骤** |
@@ -730,7 +732,7 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 
 | 项 | 内容 |
 |---|---|
-| **表面正常** | 现场 P38 的人（我）改了 `02-app-config.yaml`、跑幂等部署脚本、`kubectl apply` 返回成功、Pod 列表全绿；进 Pod 里 `sed -n` 看文件——**新代码明明已经在里面了** |
+| **表面正常** | 现场操作者改了 `02-app-config.yaml`、跑幂等部署脚本、`kubectl apply` 返回成功、Pod 列表全绿；进 Pod 里 `sed -n` 看文件——**新代码明明已经在里面了** |
 | **实际故障** | 指标**一点没变**，还是那套线性桶、`+Inf < le=10`。因为应用是 `python3 /opt/app/app.py` 的**长驻进程**，代码在**启动时**就读进内存了；ConfigMap 是**卷挂载**，文件会被 kubelet 就地更新，但**运行中的进程不会重新加载** |
 | **识别信号** | ① `kubectl get pods -o custom-columns=START:.status.startTime` —— Pod 启动时间还是**两天前**；② Pod 里 `grep` 到新代码，但指标行为没变。**"文件是新的"和"进程是新的"是两件事** |
 | **修法** | 改 ConfigMap 后显式 `kubectl -n demo-app rollout restart deploy/order deploy/payment deploy/frontend`，等滚动替换完成 |
@@ -756,14 +758,14 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 |---|---|
 | **表面正常** | 矩阵脚本打印 `✔ [13:27:36] T0=... 已注入`，接着进入"等 firing"，一轮跑完照常导出数据集。日志通篇绿勾 |
 | **实际故障** | 那一轮 **根本没有注入任何故障**：`kubectl -n chaos-mesh get networkchaos,podchaos,stresschaos` 返回 **No resources found**。于是"零告警"被当成"监控盲区"，**差一点写进报告当结论** |
-| **根因** | 两件事叠加：① 我给实验 YAML 插入的注释**第二行缩进跑到第 0 列**，把 `duration` 顶出了 `spec` 作用域 → `kubectl apply` 报 `strict decoding error: unknown field "duration"`；② 脚本里写的是 `kubectl apply -f "$FILE" >/dev/null 2>&1` —— **返回码没判、错误输出被丢弃**，失败被完全吞掉，紧跟着就是一句无条件的 `ok "已注入"` |
+| **根因** | 两件事叠加：① 实验 YAML 中的注释**第二行缩进跑到第 0 列**，把 `duration` 顶出了 `spec` 作用域 → `kubectl apply` 报 `strict decoding error: unknown field "duration"`；② 脚本里写的是 `kubectl apply -f "$FILE" >/dev/null 2>&1` —— **返回码没判、错误输出被丢弃**，失败被完全吞掉，紧跟着就是一句无条件的 `ok "已注入"` |
 | **为什么特别危险** | 这是"**沉默故障 + 假阳性结论**"的组合：实验没做，但数据、日志、流程全都正常走完。如果没去 `kubectl get` 那一句，结论会是"F03 注入后零告警 → 监控盲区"，**而真相是"根本没注入"**。它污染的不是数据，是**结论** |
 | **识别信号** | ① 日志说"已注入"，但 `kubectl get <chaosType>` 是空的；② 目标 SLI（这里是调用边 P95）**几乎没有变化**（5ms → 25ms 级），与注入参数（800ms）**量级不符** |
 | **修法** | ① 实验 YAML 的服务端校验：`kubectl apply --dry-run=server`（一次性跑完全部 7 个，暴露了这个错误）；② 脚本里 **判返回码 + 落盘错误**；③ **apply 后再数一次混沌对象**，为 0 就判失败并跳过本轮；④ 收尾打印剩余对象数 |
 | **实测** | 修后日志变成 `✔ T0=... 已注入（chaos 对象 1 个）`，`kubectl get` 能看到 `f03-net-delay-order delay 360s` |
 
 > 这是本项目里**第二次**因为"把错误丢进 `/dev/null`"而差点得出反向结论（第一次是 P33 的"实时轮询 0 条、导出却有 12 条 firing"）。
-> 通用做法：**凡是"我发出去了"的动作，都必须有一个"它真的生效了"的独立观测**，
+> 通用做法：**凡是已经发出的动作，都必须有独立观测确认它真的生效**，
 > 且这个观测要能失败 —— 否则 `ok` 只是一个愿望。
 
 ### P42 NetworkChaos 的 `target` 按 **Pod IP** 匹配，业务走 **Service ClusterIP** → 延迟"注入了但没生效"
@@ -862,7 +864,7 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 |---|---|
 | **表面正常** | 用 Python（或任何"标准 UTF-8 无 BOM"工具）写出一个 `.ps1`，文件内容肉眼完全正常、`Get-Content` 也显示正常 |
 | **实际故障** | `powershell -File xxx.ps1` 报 **`The string is missing the terminator`**，报错位置在文件末尾的 `Say "完成"` —— 中文串被解析成乱码（`Say "瀹屾垚"`）后把引号规则搞崩了 |
-| **根因** | **Windows PowerShell 5.1 默认按系统 ANSI 代码页（中文 Windows = GBK）读取无 BOM 的 `.ps1`**。文件其实是 UTF-8，于是中文字节被当 GBK 解释 → 乱码 → 乱码里可能包含引号/反斜杠等**具有语法意义的字符** → 解析失败。而 PowerShell **7+** 默认 UTF-8，所以"在我机器上没问题" |
+| **根因** | **Windows PowerShell 5.1 默认按系统 ANSI 代码页（中文 Windows = GBK）读取无 BOM 的 `.ps1`**。文件其实是 UTF-8，于是中文字节被当 GBK 解释 → 乱码 → 乱码里可能包含引号/反斜杠等**具有语法意义的字符** → 解析失败。而 PowerShell **7+** 默认 UTF-8，所以“开发机没问题” |
 | **识别信号** | ① 报错信息里的中文是乱码；② 报错位置莫名其妙（在最后一行）；③ 同样的文件用 `pwsh`(7) 跑正常、用 `powershell`(5.1) 跑失败 |
 | **修法** | 写 `.ps1` 时用 **`encoding="utf-8-sig"`**（带 BOM）。本项目 `scripts/37-sync-agent-logs.ps1` 就是这么生成的；对比 `38-dashboard.py`（`.py` 不需要 BOM，Python 3 默认按 UTF-8 读源码） |
 | **实测** | 加 BOM 后 `powershell -File` 立即正常；文件大小从 4981 → 4986 字节（多出的 3 字节就是 BOM） |
@@ -882,7 +884,7 @@ kubectl -n chaos-mesh get podchaos -o jsonpath='{.items[*].status.conditions}'
 | **修法** | 加**置信度守卫**：只有当上游**不比下游更可信**（`conf(a) <= conf(b)`）时才折叠它。即"折叠"从"无条件的规则"降级为"**低置信度时的去噪手段**" |
 | **实测** | 修后同一数据集重跑（RAG 轻量版）：输出 `order(0.9) > payment(0.6)`，**未被折叠**，Top-1 正确；耗时 6.9s、50 tok/s |
 
-> 这条最值得记的是它的**形态**：错误不在"没有答案"，而在"**答案被一个看起来合理的后处理改掉了**"。
+> 这条记录的重点是错误形态：答案并非缺失，而是被一个看起来合理的后处理步骤改掉了。
 > 通用做法：**后处理必须能被单独关闭/对照** —— 本项目把 `llm_raw`（模型原始输出）与 `parsed`（后处理结果）**都**落盘，才使得这个 bug 一小时内被抓出来。
 
 ### P50 单次"跑通了"不等于**可复现** —— 重复 3 轮后，F06 是 **0/3**

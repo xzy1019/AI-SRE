@@ -58,7 +58,7 @@ SYSTEM = """你是一名技术文档译者。请把用户给出的 Markdown 片�
    自愈=self-healing、沉默故障=silent failure、爆炸半径=blast radius、冷却期=cooldown、干跑=dry-run。
 5. **标题、粗体标签、表格单元格里的中文一律要翻**，包括括号里的补充说明。
    例如 `## 0. 演示前检查（约 1 分钟）` → `## 0. Pre-Demo Checks (~1 minute)`；
-   `**讲解词要点**` → `**Talking points**`。只在代码块里保留中文。
+   `**演示说明**` → `**Presentation notes**`。只在代码块里保留中文。
 6. 只输出译文，不要任何解释、不要前言后语、不要再包一层代码块。
 """
 

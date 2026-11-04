@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 用途 | 面试/汇报时的演示脚本：注入 → 降噪 → LLM RCA → 策略校验 → 自动执行 → SLI 恢复 → 审计留痕 |
+| 用途 | 演示或汇报时的操作流程：注入 → 降噪 → LLM RCA → 策略校验 → 自动执行 → SLI 恢复 → 审计留痕 |
 | 驱动脚本 | `scripts/28-selfheal-loop.sh`（两阶段，可重复执行） |
 | 观察窗口 | Grafana 三个盘（总览 / 业务 SLI / AIOps 自愈链路）+ Prometheus Alerts + Alertmanager |
 | 实测时长 | 从注入到完全恢复约 **7 分钟**（其中 5 分钟是 rate 窗口残留） |
@@ -24,7 +24,7 @@ kubectl -n chaos-mesh get podchaos,networkchaos --no-headers | wc -l
 curl -s -u admin:aisre-lab-admin 'http://127.0.0.1:30030/api/search?type=dash-db' | python3 -c "import json,sys;print(len(json.load(sys.stdin)),'个盘')"
 ```
 
-**讲解词**："演示前先确认三件事：集群健康、没有残留的混沌对象、观测窗口在线。"
+**演示说明：** "演示前先确认三件事：集群健康、没有残留的混沌对象、观测窗口在线。"
 
 ## 1. 注入故障（阶段一，约 2 分钟）
 
@@ -35,7 +35,7 @@ bash /opt/aisre/scripts/28-selfheal-loop.sh --stage prepare --target payment --d
 脚本会依次**自动**做：清混沌 → 给 payment/order/frontend 打 `ground-truth` 标签 → 记基线 →
 注入 `pod-failure` → 轮询等待告警 → 导出数据集 → 算降噪与根因候选。
 
-**讲解词要点**：
+**演示说明：**
 - "注入前先打 ground truth 标签，让答案随数据一起流动，而不是事后按时间窗贴"
 - "观察窗口里能看到 pending 先出现（Prometheus 独有），过了 `for: 2m` 才变 firing"
 
@@ -48,7 +48,7 @@ python3 scripts/19-rca-llm.py datasets/<数据集> --topology topology/topology.
 python3 scripts/20-eval-rca.py datasets/<数据集> --topology topology/topology.json
 ```
 
-**讲解词要点**：
+**演示说明：**
 - "降噪把 N 条告警收敛成 K 个事件簇；拓扑折叠把链上的症状折到根因"
 - "**这一步实测出现过规则基线选错、LLM 选对**：规则基线跨簇取最高分时选了 `redis`（两条依赖证据 5.0），
   而 LLM 把 `payment` 排在第一位（自身失败证据权重更高）—— 正确答案是 payment"
@@ -61,14 +61,14 @@ bash /opt/aisre/scripts/28-selfheal-loop.sh --stage heal \
      --dataset /opt/aisre/datasets/<数据集> --root-cause payment
 ```
 
-**讲解词要点**：
+**演示说明：**
 - "根因传进去后，先走**策略引擎**：8 条 check 逐条过（动作分级 / 白名单 / 冷却期 / 爆炸半径 /
   频率限制 / 幂等 / 前置条件 / 干跑）"
-- "演示时我会特意演一次**被拦下**的用例（比如 L3 缩容到 0 或越界命名空间），让你看到护栏真的在工作"
+- "演示时会运行一个被护栏拦下的用例（例如 L3 缩容到 0 或越界命名空间），让观众看到拦截结果"
 
 ## 4. 自动执行与恢复（阶段二主体）
 
-**讲解词要点**：
+**演示说明：**
 - "执行的是 `kubectl rollout restart` 等价动作（maxUnavailable=0），观察窗口里 ready 会先涨到 11/9
   —— 那是滚动重启期间新旧 Pod 共存，服务不断"
 - "**5xx 会先回到 0，但告警还在响** —— 这不是 bug：`rate(...[5m])` 有 5 分钟窗口，
@@ -88,7 +88,7 @@ for i,r in enumerate(rows,1):
 print('记录=%d 链式=%s' % (len(rows), 'OK' if not bad else '异常@%s'%bad))"
 ```
 
-**讲解词要点**：
+**演示说明：**
 - "每条动作都进审计链：`hash = sha256(prev_hash + 内容)`，任何人改了历史记录链就断"
 - "注意：**回滚不会删除审计** —— 审计的价值就在于'做过什么必须留痕'"
 
@@ -122,7 +122,7 @@ print('记录=%d 链式=%s' % (len(rows), 'OK' if not bad else '异常@%s'%bad))
 
 ## 7. 演示时最容易被打断的三个提问
 
-| 提问 | 应答要点 |
+| 问题 | 回答要点 |
 |---|---|
 | "为什么 ready 变成 11/9？" | 滚动重启的 surge：`maxSurge=1/maxUnavailable=0`，新旧 Pod 短暂共存，服务不间断 |
 | "指标已经好了，为什么告警还在响？" | 规则用 `rate(...[5m])` 与 `for: 2m`，是**故意**的滞后：避免抖动误报，代价是恢复慢一拍 |

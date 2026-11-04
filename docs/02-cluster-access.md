@@ -299,7 +299,7 @@ dnf install -y kubernetes-cni
 
 #### 5.7.1 网络限制现状（实测）
 
-集群节点与开发机的网络能力**差异极大**，这是本项目最容易踩坑的地方：
+集群节点与开发机的网络能力**差异较大**，项目中不少部署问题都出在这里：
 
 | 目标 | 集群节点 | 开发机 | 说明 |
 |---|---|---|---|
@@ -885,7 +885,7 @@ Promtail 的 `/ready` 在**没有任何可采集目标**时返回 500（这是�
 
 | 实验 | 故障 | 目标 | 观察到的结果 |
 |---|---|---|---|
-| F01 | PodChaos / pod-kill（mode: all） | payment | 副本秒级重建，SLI 只抖动一下；**未触发持续告警**（瞬时自愈，这本身是降噪场景的素材） |
+| F01 | PodChaos / pod-kill（mode: all） | payment | 副本秒级重建，SLI 只抖动一下；**未触发持续告警**（瞬时自愈，可作为降噪场景的样本） |
 | F02 | PodChaos / pod-failure（90s，mode: all） | payment | 持续不可用越过 `for` 阈值 → **`DemoAppDownstreamFailure` 在 07:50:08 触发**，order→payment 调用失败链路被正确识别 |
 
 结论：**「注入 → 指标 → 规则 → Alertmanager」这条链路已经打通**。

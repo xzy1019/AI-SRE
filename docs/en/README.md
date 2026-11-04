@@ -27,7 +27,7 @@ Read in numeric order — the numbering is the dependency order.
 | 02 | [Cluster access & host inventory](../02-cluster-access.md) | ~1105 | Credential handling, node specs, configuration record, deployment pitfalls |
 | 03 | [Local LLM environment](03-local-llm.md) · [中文](../03-local-llm.md) | ~503 | Models that run on an RTX 2070 and how to configure inference |
 | 04 | [Progress log](../04-progress-log.md) | ~308 | Day-by-day progress, status overview, asset inventory, risks, next steps |
-| 05 | [Project report](05-project-report.md) · [中文](../05-project-report.md) | ~163 | Stage results, acceptance matrix, demo script, talking points |
+| 05 | [Project report](05-project-report.md) · [中文](../05-project-report.md) | ~163 | Stage results, acceptance matrix, demo script, presentation notes |
 | 06 | [**Silent failure post-mortems**](../06-pitfalls.md) | ~909 | **50 problems that looked fine but were broken**: symptom / root cause / evidence / fix / self-check |
 | 08 | [Demo guide](08-demo-guide.md) · [中文](../08-demo-guide.md) | ~128 | End-to-end self-healing screen-recording script (3–5 min, with measured timeline) |
 | 09 | [Fault matrix report](../09-matrix-report.md) | ~401 | Injection → observation → denoise/RCA, measured (F01–F07, F13, F14) |
@@ -37,18 +37,18 @@ Read in numeric order — the numbering is the dependency order.
 
 ### Jump by need
 
-| Your goal | Read | Key sections |
+| Goal | Read | Sections |
 |---|---|---|
 | Understand the problem being solved | 01 | §1 overview, §9 chaos design, §10 evaluation |
 | Understand the technical approach | 01 | §4 module design, §7 root-cause analysis, §8 guardrails |
-| Prepare for an interview | 01 | §18.2 interview Q&A (8 questions), §1.5 differentiators |
+| Review common technical questions | 01 | §18.2 project FAQ, §1.5 design choices |
 | Connect to / operate the cluster | 02 | §1 credentials, §5.4 cluster state, §5.5 script list |
 | Troubleshoot the environment | 02 | §5.6 three key pitfalls |
 | Call the local LLM | 03 | §2 runnable model list, §4 common commands |
 | Understand component internals | 01 | §11.4 observability and chaos engineering |
 | Find the schedule | 01 | §14 development schedule, §16 milestones and acceptance |
 | Know "how far along is it" | 04 | whole file |
-| Present this project to others | 05 | §1 results, §4 demo script, §7 talking points |
+| Present this project to others | 05 | §1 results, §4 demo script, §7 presentation notes |
 | Fix / self-check a specific pitfall | 06 | whole file (each entry ends with a self-check command) |
 | Read the charts | 10 | whole file ("how to read" per chart + metric cheat sheet) |
 | See measured numbers / observability gaps | 09 | §0 conclusion, §3 results, §4 blind-spot root causes |

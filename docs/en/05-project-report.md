@@ -9,7 +9,7 @@
 | Presentation Date | 2026-11-01 |
 | Project | AI SRE Agent —— An Intelligent Fault Self-healing and Chaos Validation Platform for Cloud-native Environments |
 | Phase | Week 1 'Environment and Data Integration' **Completed Ahead of Schedule** (Original Plan: 11/02–11/08) |
-| One-sentence Conclusion | **Faults can be created, data can be collected, and alerts can be generated**; the analysis layer (denoising/RCA/self-healing) has not yet started |
+| Stage conclusion | **Faults can be created, data can be collected, and alerts can be generated**; the analysis layer (denoising/RCA/self-healing) has not yet started |
 | Related Documents | [Document Index](README.md) · [01 Technical Design](01-design.md) · [02 Cluster Access](02-cluster-access.md) · [04 Project Progress](04-progress-log.md) · [06 Silent Failure Retrospective](06-pitfalls.md) |
 
 ## 1. What Was Actually Accomplished in This Phase
@@ -71,7 +71,7 @@ The results are stored in `/var/lib/aisre/experiments/F02-...-<timestamp>/`:
 | Grafana Shows Anomaly Curves | ✅ | Business Metrics + 6 Business SLI Rules |
 | (No AI Code Written This Week) | ✅ | No model code was touched, adhering to the schedule discipline |
 
-## 3. Issues Discovered and Fixed During the Period (Interview Material, All "Surface Normal, Actual Failure")
+## 3. Issues Found and Fixed in This Phase (All Looked Normal but Were Not Working)
 
 | # | Phenomenon | Root Cause | Impact | Handling |
 |---|---|---|---|---|
@@ -97,7 +97,7 @@ The results are stored in `/var/lib/aisre/experiments/F02-...-<timestamp>/`:
 5. **Watch the alerts** (30s): `DemoAppDownstreamFailure` triggers in Alertmanager, indicating the root cause direction (order calling payment failed).
 6. **收尾** (60s): Experiment output directory + `summary.json` numbers; explain that the next step is to integrate this alert into Ingestion for denoising and RCA.
 
-**Talking points**: Not "I installed a K8s," but "I created a **repeatable, ground truth, and quantifiable** fault dataset."
+**Presentation note**: The project provides a **repeatable, ground-truth, quantifiable** fault dataset, not just a Kubernetes installation.
 
 ## 5. Data and Product Locations
 
@@ -126,7 +126,7 @@ The results are stored in `/var/lib/aisre/experiments/F02-...-<timestamp>/`:
 5. RCA + RAG (Candidate Set → Four Evidence → Local LLM Structured Output → Hallucination Check)
 6. Agent Execution + Security Guardrails (CRD + Policy Engine + Audit Hash Chain)
 
-## 7. Presentation talking points (three sentences & likely follow-ups)
+## 7. Presentation notes (three statements and likely follow-ups)
 
 **Three sentences**
 1. I set up a 5-node Kubernetes experimental environment, including observability stack and chaos engineering, all scripted and fully reproducible.
@@ -135,7 +135,7 @@ The results are stored in `/var/lib/aisre/experiments/F02-...-<timestamp>/`:
 
 **Five likely follow-up questions**
 
-| Question | Key Response Points |
+| Question | Response points |
 |---|---|
 | Why not use kind/k3s? | The goal includes node-level chaos and real node topology (inter-node network failures), which kind cannot simulate. Also, using openEuler to closely mimic a domestic environment. |
 | Is your data volume sufficient? | Clear limitations: single cluster, minute-level; the value lies in ground truth and reproducibility, not scale. Scalability path: multiple clusters and long-term data collection. |
@@ -147,4 +147,4 @@ The results are stored in `/var/lib/aisre/experiments/F02-...-<timestamp>/`:
 
 | Version | Date | Changes |
 |---|---|---|
-| v1.0 | 2026-11-01 | First report: stage results, acceptance matrix, 7 resolved issues, demo script, talking points |
+| v1.0 | 2026-11-01 | First report: stage results, acceptance matrix, 7 resolved issues, demo script, and presentation notes |

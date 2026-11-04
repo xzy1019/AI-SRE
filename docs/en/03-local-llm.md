@@ -396,7 +396,7 @@ Tier2  qwen2.5:7b  仅当 need_rca=true → 完整证据 + 初筛候选作为约
 2. **Two-Level = 7B Accuracy + Significantly Lower Latency in Complex Scenarios**: On F14, the two-level approach reached the same MRR 0.611 / precision 1.000 / recall 1.00 in 6.9s, while 7B alone took 35.7s (long prompt).
 3. **The Candidate List from Tier1 is Actually Accurate**: On F14, 0.6B gave `[payment, postgres, redis]` — all three true root causes were included in the candidate list, it just did not sort or converge. Therefore, its correct usage is **as a filter**, not as a judge.
 
-**Trade-off Curve** (can be used as an AI Infrastructure interview material): In simple scenarios (F02/F13), two-level is 2–3.5s slower than a single 7B (one additional call), but in complex scenarios (F14, 16 alerts, prompt 4812 characters), two-level is 5 times faster — because the initial screening reduces the search space for 7B.
+**Trade-off Curve**: In simple scenarios (F02/F13), the two-level path is 2–3.5s slower than a single 7B request because it makes an extra call. In the complex F14 case (16 alerts, 4,812-character prompt), it is five times faster because the first-stage filter reduces the search space for 7B.
 
 ## 7. Local Large Model Work Log (How to View)
 

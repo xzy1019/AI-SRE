@@ -6,7 +6,7 @@
 
 | Item | Content |
 |---|---|
-| Purpose | Demonstration script for interviews/presentations: injection → denoising → LLM RCA → policy validation → automatic execution → SLI recovery → audit logging |
+| Purpose | Demonstration workflow for demos and presentations: injection → denoising → LLM RCA → policy validation → automatic execution → SLI recovery → audit logging |
 | Driving Script | `scripts/28-selfheal-loop.sh` (two-phase, executable multiple times) |
 | Observation Window | Grafana three dashboards (Overview / Business SLI / AIOps Self-healing Link) + Prometheus Alerts + Alertmanager |
 | Actual Duration | Approximately **7 minutes** from injection to full recovery (with 5 minutes of rate window residual) |
@@ -24,7 +24,7 @@ kubectl -n chaos-mesh get podchaos,networkchaos --no-headers | wc -l
 curl -s -u admin:aisre-lab-admin 'http://127.0.0.1:30030/api/search?type=dash-db' | python3 -c "import json,sys;print(len(json.load(sys.stdin)),'个盘')"
 ```
 
-**Talking points**:"Before the demo, make sure three things: cluster health, no residual chaos objects, and the observability window is online."
+**Notes:** "Before the demo, make sure three things: cluster health, no residual chaos objects, and the observability window is online."
 
 ## 1. Inject Faults (Phase One, ~2 minutes)
 
@@ -34,7 +34,7 @@ bash /opt/aisre/scripts/28-selfheal-loop.sh --stage prepare --target payment --d
 
 The script will **automatically** do the following in sequence: clear chaos → label `payment/order/frontend` with `ground-truth` tags → establish baseline → inject `pod-failure` → poll and wait for alerts → export dataset → calculate denoising and RCA candidates.
 
-**Talking points**:
+**Notes**:
 - "Label with ground-truth tags before injection to ensure the answer flows with the data, not applied retrospectively with a time window"
 - "In the observation window, you can see `pending` first (unique to Prometheus), then it changes to `firing` after `for: 2m`"
 
@@ -47,7 +47,7 @@ python3 scripts/19-rca-llm.py datasets/<数据集> --topology topology/topology.
 python3 scripts/20-eval-rca.py datasets/<数据集> --topology topology/topology.json
 ```
 
-**Talking points**:
+**Notes**:
 - "Denoising converges N alarm signals into K incident clusters; topology folding folds the symptoms on the chain to the root cause."
 - "In this step, a real test showed that the rule baseline was selected incorrectly while the LLM was correct: when the rule baseline across clusters took the highest score, it selected `redis` (two dependency evidences of 5.0), while the LLM ranked `payment` first (with higher weight for self-failure evidence) — the correct answer was `payment`."
 - "Hallucination check 0: because the prompt provided a list of candidate services and the true topology, and enforced JSON output."
@@ -59,13 +59,13 @@ bash /opt/aisre/scripts/28-selfheal-loop.sh --stage heal \
      --dataset /opt/aisre/datasets/<数据集> --root-cause payment
 ```
 
-**Talking points**:
+**Notes**:
 - "After the root cause is fed in, it goes through the **Policy Engine**: 8 checks are sequentially evaluated (Action Level / Whitelist / Cool Down / Blast Radius / Rate Limiting / Idempotence / Prerequisites / Dry-run)"
 - "During the demo, I will intentionally run a case that is **blocked** (e.g., L3 scaling down to 0 or out-of-bound namespace) to show you that the guardrails are indeed working."
 
 ## 4. Automatic Execution and Recovery (Main Part of Phase II)
 
-**Talking points**:
+**Notes**:
 - "It performs the equivalent action of `kubectl rollout restart` (with maxUnavailable=0), and in the observation window, ready will spike to 11/9 first — that's because new and old Pods coexist during the rollout, and the service remains available."
 - "**5xx errors will drop to 0 first, but the alert is still ringing** — this is not a bug: the `rate(...[5m])` has a 5-minute window, and the alert will only be resolved after the window clears, even though the SLI has recovered (this is used to explain why alerts lag behind metrics)."
 
@@ -83,7 +83,7 @@ for i,r in enumerate(rows,1):
 print('记录=%d 链式=%s' % (len(rows), 'OK' if not bad else '异常@%s'%bad))"
 ```
 
-**Talking points**:
+**Notes**:
 - "Every action is hashed: `hash = sha256(prev_hash + 内容)`; any alteration of the history chain breaks the audit"
 - "Note: **Rollbacks do not delete audits** — the value of audits lies in 'what was done must be traceable'"
 
@@ -115,7 +115,7 @@ print('记录=%d 链式=%s' % (len(rows), 'OK' if not bad else '异常@%s'%bad))
 
 ## 7. The Three Most Common Questions That Can Interrupt the Demo
 
-| Question | Key Response Points |
+| Question | Response points |
 |---|---|
 | "Why did ready change to 11/9?" | Rolling restart surge: `maxSurge=1/maxUnavailable=0`, new and old Pods coexist briefly, service remains uninterrupted |
 | "The metrics are already good, why is the alert still ringing?" | The rule uses `rate(...[5m])` with `for: 2m`, which is **intentional** lag: to avoid false positives due to jitter, at the cost of a slower recovery |
