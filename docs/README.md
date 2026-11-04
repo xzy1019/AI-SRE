@@ -1,5 +1,7 @@
 # 项目文档索引
 
+**中文** | [English](en/README.md)
+
 > AI SRE Agent —— 面向云原生环境的智能故障自愈与混沌验证平台
 
 | 项 | 内容 |
@@ -24,7 +26,7 @@
 | 05 | [项目汇报](05-project-report.md) | 175 | 阶段成果、验收对照、演示脚本、汇报口径 |
 | 08 | [演示指南](08-demo-guide.md) | 260 | **端到端自愈闭环演示脚本**（3~5 分钟录屏用，含实测时间线与讲解词） |
 | 06 | [沉默故障复盘](06-pitfalls.md) | 306 | **8 个「表面正常、实则失效」的问题**：现象 / 根因 / 定位证据 / 修法 / 自查命令 |
-| 09 | [故障矩阵报告](09-matrix-report.md) | 210 | **注入 → 观测 → 降噪/RCA 的实测矩阵（F01–F07）**：可评测结果、监控盲区证据与根因、行动项 |
+| 09 | [故障矩阵报告](09-matrix-report.md) | 401 | **注入 → 观测 → 降噪/RCA 的实测矩阵（F01–F07、F13、F14）**：可评测结果、监控盲区证据与根因、行动项 |
 | 10 | [可视化导读](10-visualization-guide.md) | 210 | **怎么用图表看懂实验目的**：四张图各回答什么问题、易误读的地方、四个指标各管什么 |
 | — | **图形化控制台** | — | **集群内运行**：`http://172.29.20.21:30088`（主推，NodePort 在任意节点都可达）；**5 个标签页**：总览 / 大模型 / Agent / 实验 / **图表** |
 
@@ -81,18 +83,19 @@
 | 26 | `scripts/26-apply-grafana-dashboards.sh` | 仅 k8s-cp | 应用 3 个定制 Grafana 仪表盘并用 API 校验 |
 | 27 | `scripts/27-ollama-logs.ps1` | 开发机 | 本地大模型工作日志：查看 / 实时跟随 / 汇总 / 自检 / 可观测方式重启 |
 | 28 | `scripts/28-selfheal-loop.sh` | 仅 k8s-cp | 端到端自愈闭环驱动：两阶段（注入取证 / 策略·执行·恢复·审计），可重复执行 |
-| 29 | `scripts/29-run-matrix.sh` | 仅 k8s-cp | 故障实验矩阵 F01–F06 批量执行 + 落盘汇总；**含"告警窗口排空"闸门**（P31） |
+| 29 | `scripts/29-run-matrix.sh` | 仅 k8s-cp | 故障实验矩阵（F01–F07、F13 级联、F14 多根因）批量执行 + 落盘汇总；**含“告警窗口排空”闸门**（P31） |
 | 30 | `scripts/30-eval-matrix.py` | 任意机器（只读数据集） | 矩阵评测汇总：逐实验算降噪率/纯度/过度合并/候选 P·R/Top-1/MRR，输出 md+json |
 | 31 | `scripts/31-sync-prometheus-config.py` | 任意机器 | **把 `_prometheus*.yml` 确定性渲染进 `03-prometheus.yaml`**（含 `--check` 一致性校验，P36） |
 | 32 | `scripts/32-apply-prometheus-config.sh` | 仅 k8s-cp | 应用 Prometheus 配置/规则：**备份 → apply → 重启 → 强制验证**（规则条数/新规则/cAdvisor up） |
 | 33 | `scripts/33-check-rule-coverage.py` | 任意机器 | **规则↔降噪覆盖回归测试**（P43 防复发）：静态查「业务规则是否登记了证据分类」+ 数据查「历史数据集是否出现空候选」 |
 | 34 | `scripts/34-check-metric-contracts.py` | 任意机器（查 Prometheus） | **指标契约自检**（P38 防复发）：直方图三条不变量 —— 桶单调 / `+Inf == _count` / 均值与 P95 量级一致；含负向验证 |
 | 35 | `scripts/35-summarize-repeats.py` | 任意机器（只读数据集） | **重复性汇总**：同一故障多轮 → 均值±标准差、Top-1 命中率 |
-| 36 | `scripts/36-build-kb.py` | 开发机（Ollama bge-m3） | **构建 RAG 知识库**：把 `docs/06-pitfalls.md` 的 46 条复盘切成条目并向量化 → `kb/pitfalls-kb.jsonl` |
+| 36 | `scripts/36-build-kb.py` | 开发机（Ollama bge-m3） | **构建 RAG 知识库**：把 `docs/06-pitfalls.md` 的 50 条复盘切成条目并向量化 → `kb/pitfalls-kb.jsonl` |
 | 37 | `scripts/37-sync-agent-logs.ps1` | 开发机（SSH 到控制面） | ~~本地控制台的数据同步~~ **已停用**（2026-11-03 本地控制台删除，改由集群内控制台直连取数）；脚本保留备用 |
 | 38 | `scripts/38-dashboard.py` | **仅集群内**（`--cluster`） | **图形化控制台**：五标签页 —— 总览 / 大模型 / Agent / 实验 / **图表**（降噪率、轮次构成、RAG 对照）；实时查 Prometheus / Alertmanager / aisre-agent / K8s API |
 | 39 | `scripts/39-deploy-dashboard.sh` | 仅 k8s-cp | **把控制台部署到集群**：代码+数据走 ConfigMap（免自建镜像）→ 滚动重启 → NodePort **30088** |
 | 40 | `scripts/40-eval-rag-ab.py` | 开发机（Ollama） | **RAG 全矩阵 A/B**：同一批数据集跑「无 RAG vs 带 RAG」，比对 Top-1 / 耗时 / 检索命中 |
+| 41 | `scripts/41-collect-extra-datasets.py` | 任意机器（只读） | 收集**不在故障矩阵里**的历史实验数据集（含「已被新数据取代」标记） |
 
 全部脚本**幂等**，可重复执行；每项独立报告 `✔ / ! / ✘`，有失败项返回非零退出码。
 
