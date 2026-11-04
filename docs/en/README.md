@@ -3,6 +3,10 @@
 [中文](../README.md) | **English** · [Translation status](../i18n.md)
 
 > AI SRE Agent — intelligent fault self-healing and chaos verification for cloud-native environments.
+>
+> **Translated so far**: this index, the root `README.en.md`, and docs **03 / 05 / 08 / 10**.
+> The remaining five documents are still Chinese-only — the machine-translation drafts failed a
+> code-block integrity gate and are intentionally **not published** (see [translation status](../i18n.md)).
 
 | Item | Value |
 |---|---|
@@ -21,13 +25,13 @@ Read in numeric order — the numbering is the dependency order.
 |---|---|---|---|
 | 01 | [Technical design](../01-design.md) | ~1955 | Full project picture: architecture, modules, algorithms, evaluation, schedule, component internals |
 | 02 | [Cluster access & host inventory](../02-cluster-access.md) | ~1105 | Credential handling, node specs, configuration record, deployment pitfalls |
-| 03 | [Local LLM environment](../03-local-llm.md) | ~503 | Models that run on an RTX 2070 and how to configure inference |
+| 03 | [Local LLM environment](03-local-llm.md) · [中文](../03-local-llm.md) | ~503 | Models that run on an RTX 2070 and how to configure inference |
 | 04 | [Progress log](../04-progress-log.md) | ~308 | Day-by-day progress, status overview, asset inventory, risks, next steps |
-| 05 | [Project report](../05-project-report.md) | ~163 | Stage results, acceptance matrix, demo script, talking points |
+| 05 | [Project report](05-project-report.md) · [中文](../05-project-report.md) | ~163 | Stage results, acceptance matrix, demo script, talking points |
 | 06 | [**Silent failure post-mortems**](../06-pitfalls.md) | ~909 | **50 problems that looked fine but were broken**: symptom / root cause / evidence / fix / self-check |
-| 08 | [Demo guide](../08-demo-guide.md) | ~128 | End-to-end self-healing screen-recording script (3–5 min, with measured timeline) |
+| 08 | [Demo guide](08-demo-guide.md) · [中文](../08-demo-guide.md) | ~128 | End-to-end self-healing screen-recording script (3–5 min, with measured timeline) |
 | 09 | [Fault matrix report](../09-matrix-report.md) | ~401 | Injection → observation → denoise/RCA, measured (F01–F07, F13, F14) |
-| 10 | [Visualization guide](../10-visualization-guide.md) | ~177 | How to read each chart and what each experiment proves |
+| 10 | [Visualization guide](10-visualization-guide.md) · [中文](../10-visualization-guide.md) | ~177 | How to read each chart and what each experiment proves |
 | — | **Web console** | — | Runs **inside the cluster**: `http://<node-ip>:30088` (NodePort). Tabs: Overview / LLM / Agent / Experiments / Charts |
 
 ### Jump by need

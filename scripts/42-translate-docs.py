@@ -63,6 +63,41 @@ SYSTEM = """你是一名技术文档译者。请把用户给出的 Markdown 片�
 """
 
 
+# 模型"不翻译、改当聊天"的典型痕迹（实测 7B 翻长文档时会出现）
+DRIFT_MARKERS = ["感谢你", "感谢您", "以下是对", "以下是", "希望能帮助", "希望这些建议",
+                 "我们按照", "在本次迭代中", "总结如下", "总的来说", "I hope this helps",
+                 "Let me know", "Here is a summary", "In summary, the"]
+
+
+def verify_translation(src_text, dst_text):
+    """
+    质检：不合格就不许写出。三条硬指标（都是实测踩过的）：
+      C1 代码块**数量与内容**必须与源完全一致（7B 翻长文时曾把 43 个代码块丢到只剩 4 个）
+      C2 正文残留中文不能成片（说明某些小节没翻）
+      C3 不能出现模型"自述/评论"痕迹（说明它没在翻译，而是在答复你）
+    返回 (是否通过, 问题列表)
+    """
+    problems = []
+    cs = re.findall(r"```[\s\S]*?```", src_text)
+    cd = re.findall(r"```[\s\S]*?```", dst_text)
+    if len(cs) != len(cd):
+        problems.append("C1 代码块数量不一致：源 %d / 译 %d" % (len(cs), len(cd)))
+    else:
+        bad = [i for i, (a, b) in enumerate(zip(cs, cd), 1) if a.strip() != b.strip()]
+        if bad:
+            problems.append("C1 代码块内容被改动：第 %s 个" % bad[:6])
+    prose = re.sub(r"```[\s\S]*?```", "", dst_text)
+    prose_lines = [l for l in prose.split("\n") if l.strip()]
+    zh = [l for l in prose_lines if len(re.findall(r"[\u4e00-\u9fff]", l)) >= 3]
+    limit = max(5, int(len(prose_lines) * 0.03))
+    if len(zh) > limit:
+        problems.append("C2 正文残留中文过多：%d 行（上限 %d）" % (len(zh), limit))
+    drift = [d for d in DRIFT_MARKERS if d in dst_text]
+    if drift:
+        problems.append("C3 出现模型自述/评论痕迹：%s" % "、".join(drift[:4]))
+    return (not problems), problems
+
+
 def ollama_chat(endpoint, model, system, user, timeout=900):
     body = json.dumps({
         "model": model, "stream": False, "options": {"temperature": 0},
@@ -154,6 +189,17 @@ def translate_doc(src, lang, endpoint, model, dry_run=False, force=False):
     header = "[中文](%s) | **%s**\n\n> ⚠️ Machine-translated by `%s` — review before trusting.\n" % (
         os.path.relpath(src, os.path.dirname(out)).replace("\\", "/"), LANG_NAMES.get(lang, lang), model)
     body = "\n\n".join(translated) + "\n"
+    ok, problems = verify_translation(text, body)
+    if not ok and not force:
+        print("    ✘ 质检未通过 —— **拒绝写出**（避免把坏译文当成果发布）：")
+        for pb in problems:
+            print("        - " + pb)
+        rej = out + ".rejected"
+        os.makedirs(os.path.dirname(rej) or ".", exist_ok=True)
+        io.open(rej, "w", encoding="utf-8", newline="\n").write(header + "\n" + body)
+        print("    （草稿另存为 %s，供人工参考，不入库）" % rej)
+        return "rejected"
+
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     io.open(out, "w", encoding="utf-8", newline="\n").write(header + "\n" + body)
     io.open(out, "w", encoding="utf-8", newline="\n").write(header + "\n" + body)
@@ -199,14 +245,14 @@ def main():
         return 0
 
     os.chdir(ROOT)
-    done = skip = 0
+    done = skip = rejected = 0
     for d in docs:
         if not os.path.isfile(d):
             print("  ! 找不到 %s" % d); continue
         r = translate_doc(d, args.lang, args.endpoint, args.model, args.dry_run, args.force)
-        done += (r == "done"); skip += (r == "skip")
+        done += (r == "done"); skip += (r == "skip"); rejected += (r == "rejected")
     print()
-    print("完成 %d 篇，跳过 %d 篇" % (done, skip))
+    print("通过质检并写出 %d 篇，跳过 %d 篇，**质检未通过被拒 %d 篇**" % (done, skip, rejected))
     print("提醒：机翻产物是**草稿**，发布前请人工校对（尤其表格与术语）。")
     return 0
 
