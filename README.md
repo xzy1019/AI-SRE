@@ -231,6 +231,7 @@ python3 scripts/19-rca-llm.py datasets/<数据集> --topology topology/topology.
 | 06 | [**沉默故障复盘**](docs/06-pitfalls.md) | **50 个「表面正常、实则失效」的问题** |
 | 08 | [演示指南](docs/08-demo-guide.md) | 端到端自愈闭环录屏脚本（含实测时间线） |
 | 09 | [故障矩阵报告](docs/09-matrix-report.md) | 注入 → 观测 → 降噪/RCA 的实测矩阵与根因 |
+| 11 | [推送与凭据配置](docs/11-publish-guide.md) | GitHub SSH 密钥怎么填 / 为什么本机只能用令牌 / 代理与凭据管理器坑 |
 | 10 | [可视化导读](docs/10-visualization-guide.md) | 怎么用图表看懂实验目的 |
 | — | [文档索引](docs/README.md) | 全部文档与脚本索引 |
 

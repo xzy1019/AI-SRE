@@ -32,6 +32,7 @@ Read in numeric order — the numbering is the dependency order.
 | 08 | [Demo guide](08-demo-guide.md) · [中文](../08-demo-guide.md) | ~128 | End-to-end self-healing screen-recording script (3–5 min, with measured timeline) |
 | 09 | [Fault matrix report](../09-matrix-report.md) | ~401 | Injection → observation → denoise/RCA, measured (F01–F07, F13, F14) |
 | 10 | [Visualization guide](10-visualization-guide.md) · [中文](../10-visualization-guide.md) | ~177 | How to read each chart and what each experiment proves |
+| 11 | [Publishing & credential setup](../11-publish-guide.md) | ~130 | GitHub SSH key form, why only a PAT works here, proxy/credential-manager pitfalls, error table |
 | — | **Web console** | — | Runs **inside the cluster**: `http://<node-ip>:30088` (NodePort). Tabs: Overview / LLM / Agent / Experiments / Charts |
 
 ### Jump by need
