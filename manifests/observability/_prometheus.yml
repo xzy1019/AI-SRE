@@ -1,0 +1,143 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: aisre-lab
+    env: lab
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager.observability.svc:9093"]
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: node-exporter
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces: { names: [observability] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: node-exporter;metrics
+
+  - job_name: kube-state-metrics
+    static_configs:
+      - targets: ["kube-state-metrics.observability.svc:8080"]
+
+  # 【为什么必须显式配 authorization】—— 否则 5 个节点全部假告警 KubeletDown
+  # kubernetes_sd 只用 token 做**服务发现**；真正去 scrape 那个 URL 时，
+  # Prometheus 不会自动带上 token，于是 /api/v1/nodes/<node>/proxy/metrics
+  # 返回 403 Forbidden，up=0，KubeletDown 全量误报。
+  - job_name: kubelet
+    scheme: https
+    authorization:
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tls_config: { insecure_skip_verify: true }
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics
+
+  - job_name: kube-apiserver
+    scheme: https
+    tls_config: { insecure_skip_verify: true }
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces: { names: [default] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: kubernetes;https
+
+  # --- demo-app 业务指标（Pod 注解自动发现）---
+  # 新增业务服务只要带上 prometheus.io/scrape="true" 注解即可被抓取，
+  # 不需要回来改 Prometheus 配置（声明式发现，避免配置漂移）。
+  - job_name: demo-app
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: { names: [demo-app] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: $1
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+      # 【ground truth 标签传播】把 Pod 上的 ground-truth 标签复制成指标标签。
+      # 这样"这次故障的根因是谁"这个答案随数据一起流动，不再靠事后按时间窗贴。
+      # 注意：Prometheus 把标签名里的 - 转成 _，所以 source 是 pod_label_ground_truth。
+      - source_labels: [__meta_kubernetes_pod_label_ground_truth]
+        target_label: ground_truth
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: service
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+
+  # --- 可观测性栈自监控 + AIOps 组件（本轮补的观测盲区）---
+  # 之前 Prometheus 只抓业务与基础设施，**没抓 Alertmanager 自己**，
+  # 于是"通知到底发出去没有"只能翻日志（alertmanager_notifications_failed_total 查不到）。
+  # 这组 job 用 Service DNS 静态抓取，最少活动部件、最好排查。
+  # --- cAdvisor：容器资源指标（本轮补的观测盲区之二）---
+  # 为什么需要它：postgres / redis 这类"数据层"组件**不暴露业务 SLI**，
+  # 它们被压时既没有 5xx 也没有调用失败，只有容器资源在涨（见 docs/09 §5.2 第 4 条）。
+  # 鉴权与 kubelet job 同理：kubernetes_sd 只用 token 做服务发现，真正 scrape 时要显式带 authorization。
+  - job_name: kubelet-cadvisor
+    scheme: https
+    authorization:
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tls_config: { insecure_skip_verify: true }
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+  - job_name: alertmanager
+    metrics_path: /metrics
+    static_configs:
+        - targets: ["alertmanager.observability.svc:9093"]
+  - job_name: loki
+    metrics_path: /metrics
+    static_configs:
+        - targets: ["loki.observability.svc:3100"]
+  - job_name: grafana
+    metrics_path: /metrics
+    static_configs:
+        - targets: ["grafana.observability.svc:3000"]
+  - job_name: aisre-agent
+    metrics_path: /metrics
+    static_configs:
+        - targets: ["aisre-agent.aiops.svc:8080"]
+  - job_name: aisre-ingest
+    metrics_path: /metrics
+    static_configs:
+        - targets: ["aisre-ingest.aiops.svc:8080"]

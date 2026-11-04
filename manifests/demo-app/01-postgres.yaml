@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: demo-app
+data:
+  init.sql: |
+    -- demo 业务表。故意不建索引于 order_ref，便于制造慢查询场景。
+    CREATE TABLE IF NOT EXISTS orders (
+      id         BIGSERIAL PRIMARY KEY,
+      order_ref  TEXT        NOT NULL,
+      user_id    BIGINT      NOT NULL,
+      amount     NUMERIC(12,2) NOT NULL,
+      status     TEXT        NOT NULL DEFAULT 'created',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS payments (
+      id         BIGSERIAL PRIMARY KEY,
+      order_ref  TEXT        NOT NULL,
+      method     TEXT        NOT NULL,
+      amount     NUMERIC(12,2) NOT NULL,
+      status     TEXT        NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC);
+
+    INSERT INTO orders (order_ref, user_id, amount, status)
+    SELECT 'seed-' || g, (g % 100) + 1, (random()*900+100)::numeric(12,2), 'created'
+    FROM generate_series(1, 500) g
+    ON CONFLICT DO NOTHING;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: demo-app
+  labels: { app: postgres, tier: data }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres, tier: data }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: k8s-app2 }
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: sql, containerPort: 5432 }
+          env:
+            - { name: POSTGRES_USER,     value: demo }
+            - { name: POSTGRES_PASSWORD, value: demo-pass }
+            - { name: POSTGRES_DB,       value: demo }
+            - { name: PGDATA,            value: /var/lib/postgresql/data/pgdata }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 800m, memory: 768Mi }
+          readinessProbe:
+            exec: { command: ["pg_isready","-U","demo","-d","demo"] }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec: { command: ["pg_isready","-U","demo","-d","demo"] }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+      volumes:
+        - name: init
+          configMap: { name: postgres-init }
+        - name: data
+          hostPath: { path: /var/lib/aisre/demo/postgres, type: DirectoryOrCreate }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: demo-app
+  labels: { app: postgres }
+spec:
+  clusterIP: None
+  selector: { app: postgres }
+  ports:
+    - { name: sql, port: 5432, targetPort: 5432 }

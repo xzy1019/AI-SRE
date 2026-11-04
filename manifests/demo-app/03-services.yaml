@@ -1,0 +1,213 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: demo-app
+  labels: { app: frontend, tier: edge }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: frontend }
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: frontend, tier: edge }
+      annotations:
+        checksum/code: "C68B08E1AC79"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+      # Prometheus 用注解自动发现
+    spec:
+      nodeSelector: { kubernetes.io/hostname: k8s-app1 }
+      containers:
+        - name: app
+          image: docker.io/library/python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/app/app.py"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: SERVICE_NAME
+              value: "frontend"
+            - name: PORT
+              value: "8080"
+            - name: DOWNSTREAM_URL
+              value: "http://order.demo-app.svc:8080"
+            - name: DOWNSTREAM_NAME
+              value: "order"
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits:   { cpu: 800m, memory: 384Mi }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          volumeMounts:
+            - { name: code, mountPath: /opt/app, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: demo-app-code }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: demo-app
+  labels: { app: frontend }
+spec:
+  selector: { app: frontend }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+  namespace: demo-app
+  labels: { app: order, tier: core }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: order }
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: order, tier: core }
+      annotations:
+        checksum/code: "C68B08E1AC79"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+      # Prometheus 用注解自动发现
+    spec:
+      nodeSelector: { kubernetes.io/hostname: k8s-app1 }
+      containers:
+        - name: app
+          image: docker.io/library/python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/app/app.py"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: SERVICE_NAME
+              value: "order"
+            - name: PORT
+              value: "8080"
+            - name: DOWNSTREAM_URL
+              value: "http://payment.demo-app.svc:8080"
+            - name: DOWNSTREAM_NAME
+              value: "payment"
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits:   { cpu: 800m, memory: 384Mi }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          volumeMounts:
+            - { name: code, mountPath: /opt/app, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: demo-app-code }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order
+  namespace: demo-app
+  labels: { app: order }
+spec:
+  selector: { app: order }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment
+  namespace: demo-app
+  labels: { app: payment, tier: core }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: payment }
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: payment, tier: core }
+      annotations:
+        checksum/code: "C68B08E1AC79"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+      # Prometheus 用注解自动发现
+    spec:
+      nodeSelector: { kubernetes.io/hostname: k8s-app2 }
+      containers:
+        - name: app
+          image: docker.io/library/python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/app/app.py"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: SERVICE_NAME
+              value: "payment"
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: "postgres.demo-app.svc"
+            - name: REDIS_HOST
+              value: "redis.demo-app.svc"
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits:   { cpu: 800m, memory: 384Mi }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          volumeMounts:
+            - { name: code, mountPath: /opt/app, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: demo-app-code }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment
+  namespace: demo-app
+  labels: { app: payment }
+spec:
+  selector: { app: payment }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

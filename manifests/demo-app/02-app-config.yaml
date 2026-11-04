@@ -1,0 +1,286 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-app-code
+  namespace: demo-app
+  labels: { app: demo-app }
+data:
+  app.py: |
+    #!/usr/bin/env python3
+    # -*- coding: utf-8 -*-
+    """
+    AISRE demo 微服务（纯标准库实现，无第三方依赖）
+    
+    三个服务共用此代码，靠环境变量区分角色：
+      frontend -> order -> payment -> (postgres / redis)
+    
+    对外端点：
+      /            业务端点，向下游发起调用，返回链路结果
+      /metrics     Prometheus 文本格式指标
+      /healthz     健康检查
+      /slow?ms=N   人为注入延迟（用于验证观测链路，非混沌）
+    
+    暴露指标（RCA 依赖这些）：
+      http_requests_total{service,endpoint,status}
+      http_request_duration_seconds{service,endpoint}      histogram
+      downstream_requests_total{service,downstream,result}
+      downstream_duration_seconds{service,downstream}      histogram
+      active_requests{service}
+      service_info{service,version}
+    """
+    import json
+    import os
+    import random
+    import socket
+    import sys
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+    from collections import defaultdict
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse, parse_qs
+    # 提高 TCP accept 队列（socketserver 默认仅 5）：
+    # 业务请求 + Prometheus 抓取 + 探针并发时，backlog 溢出会丢弃新连接，
+    # 表现为探针 "context deadline exceeded"，继而被 kubelet 判死重启。
+    ThreadingHTTPServer.request_queue_size = 128
+    
+    SERVICE = os.environ.get("SERVICE_NAME", "unknown")
+    VERSION = os.environ.get("SERVICE_VERSION", "1.0.0")
+    PORT = int(os.environ.get("PORT", "8080"))
+    DOWNSTREAM = os.environ.get("DOWNSTREAM_URL", "").rstrip("/")
+    DOWNSTREAM_NAME = os.environ.get("DOWNSTREAM_NAME", "")
+    DB_HOST = os.environ.get("DB_HOST", "")
+    REDIS_HOST = os.environ.get("REDIS_HOST", "")
+    ERROR_RATE = float(os.environ.get("SIMULATED_ERROR_RATE", "0"))
+    
+    # 直方图桶（秒）
+    BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    
+    _lock = threading.Lock()
+    _http_total = defaultdict(int)          # (endpoint,status) -> count
+    _http_hist = defaultdict(lambda: [0]*(len(BUCKETS)+2))   # (endpoint) -> buckets,sum,count
+    _down_total = defaultdict(int)          # (downstream,result) -> count
+    _down_hist = defaultdict(lambda: [0]*(len(BUCKETS)+2))
+    _active = defaultdict(int)
+    
+    
+    def log(level, msg, **kw):
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+               "level": level, "service": SERVICE, "msg": msg}
+        rec.update(kw)
+        print(json.dumps(rec, ensure_ascii=False), flush=True)
+    
+    
+    def observe(hist, key, seconds):
+        h = hist[key]
+        for i, b in enumerate(BUCKETS):
+            if seconds <= b:
+                h[i] += 1
+        h[len(BUCKETS)] += seconds     # sum
+        h[len(BUCKETS)+1] += 1         # count
+    
+    
+    def http_call(url, timeout=3.0):
+        """调用下游，返回 (ok, status, body, elapsed)"""
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"aisre/{SERVICE}"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read(2048).decode("utf-8", "ignore")
+                return True, r.status, body, time.time() - t0
+        except urllib.error.HTTPError as e:
+            return False, e.code, str(e), time.time() - t0
+        except Exception as e:
+            return False, 0, f"{type(e).__name__}: {e}", time.time() - t0
+    
+    
+    def tcp_check(host, port, timeout=2.0):
+        """轻量依赖探测（不引入驱动依赖）"""
+        if not host:
+            return None
+        t0 = time.time()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True, time.time() - t0
+        except Exception:
+            return False, time.time() - t0
+    
+    
+    def render_metrics():
+        out = []
+        out.append("# HELP service_info 服务基本信息")
+        out.append("# TYPE service_info gauge")
+        out.append(f'service_info{{service="{SERVICE}",version="{VERSION}"}} 1')
+    
+        out.append("# HELP active_requests 正在处理的请求数")
+        out.append("# TYPE active_requests gauge")
+        out.append(f'active_requests{{service="{SERVICE}"}} {_active["cur"]}')
+    
+        out.append("# HELP http_requests_total HTTP 请求总数")
+        out.append("# TYPE http_requests_total counter")
+        for (ep, st), v in sorted(_http_total.items()):
+            out.append(f'http_requests_total{{service="{SERVICE}",endpoint="{ep}",status="{st}"}} {v}')
+    
+        out.append("# HELP http_request_duration_seconds 请求耗时")
+        out.append("# TYPE http_request_duration_seconds histogram")
+        for ep, h in sorted(_http_hist.items()):
+            # 【坑：直方图二次累积】
+            # observe() 里已经按"每个满足 seconds<=b 的桶各 +1"累加过了，
+            # 所以 h[i] 本身就是累积值。这里若再 cum += h[i] 累加一次，
+            # 就会把累积值再加一遍，得到"累积的累积"。
+            # 后果非常隐蔽且后果严重：
+            #   · le="10.0" 的计数会远大于真实请求总数（实测：1139 vs 116）
+            #   · histogram_quantile 据此把一个 10ms 的真实 P95 算成 7.5s
+            #   · 于是 DemoAppHighLatency 变成"永久告警"，把噪声喂给后面的 AIOps 分析
+            # 直方图的正确口径：bucket 单调不减，le="+Inf" == _count。
+            for i, b in enumerate(BUCKETS):
+                out.append(f'http_request_duration_seconds_bucket{{service="{SERVICE}",endpoint="{ep}",le="{b}"}} {h[i]}')
+            out.append(f'http_request_duration_seconds_bucket{{service="{SERVICE}",endpoint="{ep}",le="+Inf"}} {h[len(BUCKETS)+1]}')
+            out.append(f'http_request_duration_seconds_sum{{service="{SERVICE}",endpoint="{ep}"}} {h[len(BUCKETS)]:.6f}')
+            out.append(f'http_request_duration_seconds_count{{service="{SERVICE}",endpoint="{ep}"}} {h[len(BUCKETS)+1]}')
+    
+        if _down_total:
+            out.append("# HELP downstream_requests_total 下游调用总数")
+            out.append("# TYPE downstream_requests_total counter")
+            for (dn, res), v in sorted(_down_total.items()):
+                out.append(f'downstream_requests_total{{service="{SERVICE}",downstream="{dn}",result="{res}"}} {v}')
+    
+            out.append("# HELP downstream_duration_seconds 下游调用耗时")
+            out.append("# TYPE downstream_duration_seconds histogram")
+            for dn, h in sorted(_down_hist.items()):
+                # 【与 P02 同源的坑：下游直方图的"累积的累积"，2026-11-03 修复】
+                # observe() 已经是累积写法（每个满足 seconds<=b 的桶各 +1、不 break），
+                # 所以 h[i] 本身就是累积值 —— 这里若再 cum += h[i] 就是二次累积。
+                # 为什么潜伏这么久：**这个指标以前没有任何规则/面板消费它**，
+                #   没有消费者 → 没人发现它是错的 → 典型的"沉默故障"（P03/P29 同族）。
+                # 直到 2026-11-03 新增 DemoAppDownstreamLatencyHigh 规则第一次消费它，
+                #   规则在**完全空闲**时全线 firing，才把它暴露出来。
+                # 实测坏数据的特征（修复前）：
+                #   · le="+Inf"(63653) **小于** le="10"(699955) —— 违反直方图基本不变量
+                #   · 各桶计数随 le 线性递增（每个桶固定多 63653）
+                #   · histogram_quantile 把 10ms 级的调用算成 7.25s
+                # 正确口径：bucket 单调不减，le="+Inf" == _count（与 HTTP 直方图一致）。
+                for i, b in enumerate(BUCKETS):
+                    out.append(f'downstream_duration_seconds_bucket{{service="{SERVICE}",downstream="{dn}",le="{b}"}} {h[i]}')
+                out.append(f'downstream_duration_seconds_bucket{{service="{SERVICE}",downstream="{dn}",le="+Inf"}} {h[len(BUCKETS)+1]}')
+                out.append(f'downstream_duration_seconds_sum{{service="{SERVICE}",downstream="{dn}"}} {h[len(BUCKETS)]:.6f}')
+                out.append(f'downstream_duration_seconds_count{{service="{SERVICE}",downstream="{dn}"}} {h[len(BUCKETS)+1]}')
+        return "\n".join(out) + "\n"
+    
+    
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+    
+        def log_message(self, fmt, *args):
+            pass    # 关闭默认访问日志，改用结构化日志
+    
+        def _send(self, code, body, ctype="application/json; charset=utf-8"):
+            # body 支持 dict / list / str / bytes，统一序列化后再写
+            if isinstance(body, (dict, list)):
+                data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            elif isinstance(body, str):
+                data = body.encode("utf-8")
+            else:
+                data = body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            path = parsed.path
+            qs = parse_qs(parsed.query)
+    
+            if path == "/healthz":
+                return self._send(200, {"status": "ok", "service": SERVICE})
+    
+            if path == "/metrics":
+                body = render_metrics()
+                return self._send(200, body, "text/plain; version=0.0.4; charset=utf-8")
+    
+            # ---- 业务端点 ----
+            with _lock:
+                _active["cur"] += 1
+            t0 = time.time()
+            status = 500
+            try:
+                slow_ms = int(qs.get("ms", ["0"])[0])
+                if slow_ms > 0:
+                    time.sleep(slow_ms / 1000.0)
+    
+                # 模拟错误率（默认 0，混沌实验时不需要它）
+                if ERROR_RATE > 0 and random.random() < ERROR_RATE:
+                    raise RuntimeError("simulated business error")
+    
+                result = {"service": SERVICE, "ts": time.time()}
+    
+                # 下游 HTTP 调用（链路：frontend -> order -> payment）
+                if DOWNSTREAM:
+                    url = DOWNSTREAM + (self.path if self.path.startswith("/") else "/")
+                    ok, code, body, el = http_call(url)
+                    observe(_down_hist, DOWNSTREAM_NAME, el)
+                    _down_total[(DOWNSTREAM_NAME, "ok" if ok else "error")] += 1
+                    result["downstream"] = {"name": DOWNSTREAM_NAME, "ok": ok,
+                                            "status": code, "ms": round(el * 1000, 2)}
+                    if not ok:
+                        log("ERROR", "下游调用失败",
+                            downstream=DOWNSTREAM_NAME, status=code, detail=body[:200])
+                        status = 502
+                        return self._send(status, result)
+    
+                # 依赖探测（payment 探测 pg/redis）
+                deps = {}
+                for name, host, port in (("postgres", DB_HOST, 5432), ("redis", REDIS_HOST, 6379)):
+                    r = tcp_check(host, port)
+                    if r is not None:
+                        ok, el = r
+                        deps[name] = {"ok": ok, "ms": round(el * 1000, 2)}
+                        _down_total[(name, "ok" if ok else "error")] += 1
+                        observe(_down_hist, name, el)
+                if deps:
+                    result["deps"] = deps
+                    if any(not d["ok"] for d in deps.values()):
+                        log("ERROR", "依赖不可用", deps=deps)
+                        status = 503
+                        return self._send(status, result)
+    
+                status = 200
+                self._send(status, result)
+            except Exception as e:
+                log("ERROR", "请求处理异常", error=f"{type(e).__name__}: {e}")
+                status = 500
+                try:
+                    self._send(status, {"error": str(e)})
+                except Exception:
+                    pass
+            finally:
+                el = time.time() - t0
+                with _lock:
+                    _active["cur"] -= 1
+                    _http_total[(path, str(status))] += 1
+                    observe(_http_hist, path, el)
+                if status >= 500:
+                    log("ERROR", "请求失败", path=path, status=status, ms=round(el * 1000, 2))
+                elif path != "/metrics":
+                    log("INFO", "请求完成", path=path, status=status, ms=round(el * 1000, 2))
+    
+    
+    def main():
+        log("INFO", "服务启动", port=PORT, downstream=DOWNSTREAM or None,
+            db=DB_HOST or None, redis=REDIS_HOST or None)
+        srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        srv.daemon_threads = True
+        try:
+            srv.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            srv.server_close()
+            log("INFO", "服务退出")
+    
+    
+    if __name__ == "__main__":
+        main()

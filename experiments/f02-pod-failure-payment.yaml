@@ -1,0 +1,40 @@
+# ============================================================
+# F02 —— payment-service 全部副本持续不可用（单故障实验）
+#
+# 故障类型 : PodChaos / pod-failure（把容器替换为 pause，时长内持续不可用）
+# 目标     : demo-app/payment（mode: all）
+# 真实根因 : payment-service
+# 时长     : 90s
+#
+# 与 F01 的区别：
+#   F01 pod-kill  是"一次性杀掉"——副本秒级重建，SLI 只抖动一下就恢复，
+#                 观察期常常看不到告警触发（**这本身就是降噪场景的素材**：
+#                 瞬时自愈的故障不该惊动人）。
+#   F02 pod-failure 在时长内"持续不可用"——足以越过告警的 for 阈值，
+#                 用来验证「注入 → 指标/日志/告警 → Alertmanager」这条链路。
+#
+# 预期触发的告警：
+#   DemoAppDownstreamFailure（order 调 payment 持续失败）
+#   DemoAppHighErrorRate（frontend 把 5xx 透传给用户）
+#
+# 使用: bash run-experiment.sh f02-pod-failure-payment.yaml 120
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f02-pod-failure-payment
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F02
+    ground-truth: payment-service
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: payment
+  # 【时长校准】告警侧是 5m 速率窗口 + for: 2m/3m；故障短于判定时长会**结构性抓不住**（矩阵 F03/F04/F05 实测，见 docs/09 §4）。
+  #            本实验时长按 “≥ 6 分钟” 调整，确保规则有足够时间从 pending 走到 firing。
+  duration: '300s'

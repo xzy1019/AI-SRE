@@ -1,0 +1,54 @@
+# ============================================================
+# .gitignore —— 公开仓库只收「项目本体」，不收运行产物与数据
+# ============================================================
+
+# ---- 运行产物 / 日志 ----
+_logs/
+*.log
+.ollama/
+
+# ---- 实验数据（体积大、且含应用日志；用 15/29/35/41 号脚本自行生成）----
+datasets/*/
+datasets/*.jsonl
+datasets/*.json
+datasets/*.env
+# 只保留：数据集格式说明 + 指标口径说明 + 人读结果摘要
+!datasets/README.md
+!datasets/matrix_eval.md
+!datasets/repeats_summary.md
+
+# ---- RAG 向量库（1MB，可由 36 号脚本重建）----
+kb/
+# 保留空目录占位
+!kb/.gitkeep
+
+# ---- 内部校验/备份目录 ----
+_verify/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 本地模型与工具 -
+D:/LLM/
+*.gguf
+*.safetensors
+
+# ---- 凭据（严禁入库）----
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+kubeconfig
+*.kubeconfig
+.env
+.env.*
+secrets/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

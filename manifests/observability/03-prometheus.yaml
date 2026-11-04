@@ -1,0 +1,489 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["nodes","nodes/metrics","nodes/proxy","services","endpoints","pods","configmaps"]
+    verbs: ["get","list","watch"]
+  - nonResourceURLs: ["/metrics","/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: prometheus }
+subjects:
+  - { kind: ServiceAccount, name: prometheus, namespace: observability }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 30s
+      external_labels:
+        cluster: aisre-lab
+        env: lab
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager.observability.svc:9093"]
+
+    rule_files:
+      - /etc/prometheus/rules.yml
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [observability] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: node-exporter;metrics
+
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ["kube-state-metrics.observability.svc:8080"]
+
+      # 【为什么必须显式配 authorization】—— 否则 5 个节点全部假告警 KubeletDown
+      # kubernetes_sd 只用 token 做**服务发现**；真正去 scrape 那个 URL 时，
+      # Prometheus 不会自动带上 token，于是 /api/v1/nodes/<node>/proxy/metrics
+      # 返回 403 Forbidden，up=0，KubeletDown 全量误报。
+      - job_name: kubelet
+        scheme: https
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config: { insecure_skip_verify: true }
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+
+      - job_name: kube-apiserver
+        scheme: https
+        tls_config: { insecure_skip_verify: true }
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [default] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: kubernetes;https
+
+      # --- demo-app 业务指标（Pod 注解自动发现）---
+      # 新增业务服务只要带上 prometheus.io/scrape="true" 注解即可被抓取，
+      # 不需要回来改 Prometheus 配置（声明式发现，避免配置漂移）。
+      - job_name: demo-app
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: { names: [demo-app] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: $1
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+          # 【ground truth 标签传播】把 Pod 上的 ground-truth 标签复制成指标标签。
+          # 这样"这次故障的根因是谁"这个答案随数据一起流动，不再靠事后按时间窗贴。
+          # 注意：Prometheus 把标签名里的 - 转成 _，所以 source 是 pod_label_ground_truth。
+          - source_labels: [__meta_kubernetes_pod_label_ground_truth]
+            target_label: ground_truth
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: service
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+
+      # --- 可观测性栈自监控 + AIOps 组件（本轮补的观测盲区）---
+      # 之前 Prometheus 只抓业务与基础设施，**没抓 Alertmanager 自己**，
+      # 于是"通知到底发出去没有"只能翻日志（alertmanager_notifications_failed_total 查不到）。
+      # 这组 job 用 Service DNS 静态抓取，最少活动部件、最好排查。
+      # --- cAdvisor：容器资源指标（本轮补的观测盲区之二）---
+      # 为什么需要它：postgres / redis 这类"数据层"组件**不暴露业务 SLI**，
+      # 它们被压时既没有 5xx 也没有调用失败，只有容器资源在涨（见 docs/09 §5.2 第 4 条）。
+      # 鉴权与 kubelet job 同理：kubernetes_sd 只用 token 做服务发现，真正 scrape 时要显式带 authorization。
+      - job_name: kubelet-cadvisor
+        scheme: https
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config: { insecure_skip_verify: true }
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+      - job_name: alertmanager
+        metrics_path: /metrics
+        static_configs:
+            - targets: ["alertmanager.observability.svc:9093"]
+      - job_name: loki
+        metrics_path: /metrics
+        static_configs:
+            - targets: ["loki.observability.svc:3100"]
+      - job_name: grafana
+        metrics_path: /metrics
+        static_configs:
+            - targets: ["grafana.observability.svc:3000"]
+      - job_name: aisre-agent
+        metrics_path: /metrics
+        static_configs:
+            - targets: ["aisre-agent.aiops.svc:8080"]
+      - job_name: aisre-ingest
+        metrics_path: /metrics
+        static_configs:
+            - targets: ["aisre-ingest.aiops.svc:8080"]
+
+  rules.yml: |
+    groups:
+      - name: aisre-lab.rules
+        rules:
+          - alert: PodCrashLooping
+            expr: |
+              max_over_time(kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}[5m]) > 0
+            for: 1m
+            labels: { severity: critical, category: pod }
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} 处于 CrashLoopBackOff"
+              description: "容器 {{ $labels.container }} 反复重启"
+
+          - alert: PodNotReady
+            expr: |
+              sum by (namespace, pod) (kube_pod_status_ready{condition="true"}) == 0
+              and on(namespace,pod) kube_pod_status_phase{phase="Running"} == 1
+            for: 3m
+            labels: { severity: warning, category: pod }
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} 长时间未就绪"
+
+          - alert: PodRestartingFrequently
+            expr: |
+              increase(kube_pod_container_status_restarts_total[15m]) > 3
+            for: 2m
+            labels: { severity: warning, category: pod }
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} 15 分钟内重启超过 3 次"
+
+          - alert: DeploymentReplicasMismatch
+            expr: |
+              kube_deployment_spec_replicas != kube_deployment_status_replicas_available
+            for: 5m
+            labels: { severity: warning, category: workload }
+            annotations:
+              summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} 副本数与期望不符"
+
+          - alert: NodeMemoryHigh
+            expr: |
+              (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.85
+            for: 5m
+            labels: { severity: warning, category: node }
+            annotations:
+              summary: "节点 {{ $labels.instance }} 内存使用率超过 85%"
+
+          - alert: NodeFilesystemHigh
+            expr: |
+              (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) > 0.85
+            for: 10m
+            labels: { severity: warning, category: node }
+            annotations:
+              summary: "节点 {{ $labels.instance }} 磁盘 {{ $labels.mountpoint }} 使用率超过 85%"
+
+          - alert: NodeCPUHigh
+            expr: |
+              (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.85
+            for: 10m
+            labels: { severity: warning, category: node }
+            annotations:
+              summary: "节点 {{ $labels.instance }} CPU 使用率超过 85%"
+
+          - alert: KubeletDown
+            expr: up{job="kubelet"} == 0
+            for: 2m
+            labels: { severity: critical, category: node }
+            annotations:
+              summary: "节点 {{ $labels.instance }} 的 kubelet 不可达"
+
+          # --- 业务级 SLI 告警（RCA 的输入源）---
+          # 与上面的 Pod/Node 级告警互补：Pod 级告警回答「容器有没有挂」，
+          # 业务级告警回答「用户有没有受影响」。根因分析需要两类信号一起看：
+          #   业务异常 + 底层无异常  => 大概率是应用内部问题
+          #   业务异常 + 底层也异常  => 顺着拓扑往下找
+          - alert: DemoAppHighErrorRate
+            expr: |
+              (sum by (service, ground_truth) (rate(http_requests_total{job="demo-app",status=~"5.."}[5m]))
+               / sum by (service, ground_truth) (rate(http_requests_total{job="demo-app"}[5m]))) > 0.05
+              and on(service, ground_truth) sum by (service, ground_truth) (rate(http_requests_total{job="demo-app"}[5m])) > 0.2
+            for: 2m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "业务 {{ $labels.service }} 5xx 错误率超过 5%"
+              description: "近 5 分钟 5xx 占比 {{ $value | humanizePercentage }}（要求 QPS > 0.2 才告警，避免低流量误报）"
+
+          - alert: DemoAppHighLatency
+            expr: |
+              histogram_quantile(0.95,
+                sum by (le, service, ground_truth) (rate(http_request_duration_seconds_bucket{job="demo-app",endpoint="/"}[5m]))) > 1
+            for: 3m
+            labels: { severity: warning, category: app }
+            annotations:
+              summary: "业务 {{ $labels.service }} P95 延迟超过 1s"
+
+          - alert: DemoAppDownstreamFailure
+            expr: |
+              sum by (service, downstream, ground_truth) (rate(downstream_requests_total{job="demo-app",result="error"}[5m])) > 0.05
+            for: 2m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "{{ $labels.service }} 调用下游 {{ $labels.downstream }} 持续失败"
+              description: "失败速率 {{ $value }}/s —— 级联故障的关键信号"
+
+          - alert: DemoAppScrapeDown
+            expr: up{job="demo-app"} == 0
+            for: 1m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "demo-app 实例 {{ $labels.pod }} 指标抓取失败（进程可能已死或不可达）"
+
+          - alert: DemoAppDependencyDown
+            expr: |
+              sum by (service, downstream, ground_truth) (rate(downstream_requests_total{job="demo-app",downstream=~"postgres|redis",result="error"}[5m])) > 0.05
+            for: 2m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "{{ $labels.service }} 依赖 {{ $labels.downstream }} 不可用"
+
+          # ================= 【观测盲区补丁】=================
+          # 来源：故障矩阵 F01–F07 反推出来的缺口（见 docs/09-matrix-report.md §5.2）。
+          # 事实：F03/F04/F05 三个注入在监控侧**零告警**，但 F05 实测 QPS 5.69 → 0.144、5xx → 0.578/s。
+          # 三类缺口：
+          #   ① 故障时长（120s）< 判定时长（5m 窗口 + for: 2m）→ 短故障结构性地抓不住；
+          #   ② DemoAppHighErrorRate 要求 QPS > 0.2 的低流量保护，
+          #      恰好在"故障把流量打塌"时把告警压住 —— 保护机制反过来制造盲区；
+          #   ③ DemoAppHighLatency 只看被调方自身 P95，测不到"加在调用边上"的延迟。
+          # 策略：**不动**原规则（面向稳态、低误报），另加一组"快通道 + 相对基线"规则，
+          #       由策略层决定哪一组触发哪一级处置。
+
+          - alert: DemoAppHighErrorRateFast
+            expr: |
+              sum by (service, ground_truth) (rate(http_requests_total{job="demo-app",status=~"5.."}[2m])) > 0.1
+            for: 1m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "业务 {{ $labels.service }} 5xx 速率突增（快速通道）"
+              description: "近 2 分钟 5xx 绝对速率 {{ $value }}/s —— 不设 QPS 下限，避免流量塌陷时告警被抑制"
+
+          - alert: DemoAppDownstreamFailureFast
+            expr: |
+              sum by (service, downstream, ground_truth) (rate(downstream_requests_total{job="demo-app",result="error"}[2m])) > 0.05
+            for: 1m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "{{ $labels.service }} 调用下游 {{ $labels.downstream }} 失败（快速通道）"
+              description: "失败速率 {{ $value }}/s；2m 窗口 + 1m for（原规则 5m + 2m，120s 级故障抓不住）"
+
+          - alert: DemoAppTrafficCollapse
+            expr: |
+              (sum by (service, ground_truth) (rate(http_requests_total{job="demo-app"}[2m]))
+               < 0.25 * sum by (service, ground_truth) (rate(http_requests_total{job="demo-app"}[10m] offset 10m)))
+              and on(service)
+              (sum by (service) (rate(http_requests_total{job="demo-app"}[10m] offset 10m)) > 0.5)
+            for: 2m
+            labels: { severity: critical, category: app }
+            annotations:
+              summary: "业务 {{ $labels.service }} 流量塌陷（可能已被故障压垮）"
+              description: "近 2 分钟 QPS 不足 10 分钟前基线的 25%。与错误率规则互补：流量塌陷时错误率会失去分母"
+
+          # 【边类告警判责】2026-11-03 加：只把"延迟"归给调用方**当被调方自己健康时**
+          #   · 被调方自身服务端 P95 正常（< 1s）⇒ 它没变慢，问题在"调用方的出向路径/这条边"
+          #   · 被调方自己也在慢 / 根本没有请求（如分区时 rate=0 → histogram_quantile=NaN ⇒ 右侧无序列）
+          #     ⇒ 这条边的延迟只是下游故障的**症状**，不该独立成一条"边故障"告警
+          #   实现：用 label_replace 把"被调方自身 P95"的 service 复制成 downstream，再 and on(downstream)
+          #   实测动机：F05（payment 分区）里这条规则原来也 firing 5 次，把 payment 之外的服务带进了候选集合（P43）。
+          - alert: DemoAppDownstreamLatencyHigh
+            expr: |
+              histogram_quantile(0.95,
+                sum by (le, service, downstream, ground_truth) (rate(downstream_duration_seconds_bucket{job="demo-app"}[2m]))) > 0.5
+              and on(downstream)
+              label_replace(
+                histogram_quantile(0.95,
+                  sum by (le, service) (rate(http_request_duration_seconds_bucket{job="demo-app"}[2m]))) < 1,
+                "downstream", "$1", "service", "(.+)")
+              # 且这条边**不能同时在报错**：慢 + 错 = 下游挂了，属于"下游故障"而不是"边/出向路径故障"
+              # 实测动机：F05（payment 分区）恢复期被调方一度恢复服务，2m 窗口里旧的高延迟让规则又 firing 了一次，
+              #   结果把 F05 的归因带偏到 order（Top-1 精确率 100% → 0%）。加这道闸门后该告警不再误报。
+              and on(service, downstream)
+              (sum by (service, downstream) (rate(downstream_requests_total{job="demo-app",result="error"}[2m])) < 0.05)
+            for: 1m
+            labels: { severity: warning, category: app }
+            annotations:
+              summary: "{{ $labels.service }} 调用下游 {{ $labels.downstream }} 的 P95 延迟超过 0.5s（被调方自身正常）"
+              description: "按**调用边**（service → downstream）度量，且**被调方自身 P95 正常** ⇒ 责任在调用方的出向路径/这条边；被调方也慢时会下沉为下游故障，不在此告警"
+
+          # 【为什么加这条】F06（memory stress）实测**不可复现**：压力 200MB 面对 384Mi 的 limit，
+          #   加上应用自身约 30MiB，总量 230MiB 远低于 limit → OOM 只在应用自身内存抖动时偶发触发。
+          #   结果是三轮重复实验里 **0/3 产生告警**（P50）。
+          #   修法两部分：① 实验压力调到能稳定压到 limit 附近；② **补一条确定性的资源告警**——
+          #   不再依赖"是否恰好 OOM"，而是直接盯"内存工作集占 limit 的比例"。
+          - alert: ContainerMemoryHigh
+            expr: |
+              (container_memory_working_set_bytes{job="kubelet-cadvisor",namespace="demo-app",container!="",image!=""}
+               / container_spec_memory_limit_bytes{job="kubelet-cadvisor",namespace="demo-app",container!="",image!=""}) > 0.85
+              and on(namespace, pod, container)
+              (container_spec_memory_limit_bytes{job="kubelet-cadvisor",namespace="demo-app",container!="",image!=""} > 0)
+            for: 2m
+            labels: { severity: warning, category: workload }
+            annotations:
+              summary: "容器 {{ $labels.namespace }}/{{ $labels.pod }} 内存已用超过 limit 的 85%"
+              description: "工作集占 limit 的 {{ $value | humanizePercentage }} —— 逼近 OOM 的直接证据（不依赖是否恰好被杀）"
+
+          - alert: ContainerCPUHigh
+            expr: |
+              sum by (namespace, pod, container) (
+                rate(container_cpu_usage_seconds_total{job="kubelet-cadvisor",namespace="demo-app",container!="",image!=""}[5m])) > 0.5
+            for: 3m
+            labels: { severity: warning, category: workload }
+            annotations:
+              summary: "容器 {{ $labels.namespace }}/{{ $labels.pod }} CPU 使用超过 0.5 核"
+              description: "容器级 CPU 占用 —— 数据层（postgres/redis）被压时的直接证据，补业务 SLI 的盲区"
+
+          # --- AIOps 链路健康（"通知发不出去"必须能自动发现）---
+          - alert: AlertmanagerNotifyFailing
+            expr: increase(alertmanager_notifications_failed_total[10m]) > 0
+            for: 5m
+            labels: { severity: warning, category: aiops }
+            annotations:
+              summary: "Alertmanager 通知发送失败（近 10 分钟）"
+              description: "通常是 receiver 指向的服务不存在或不可达：{{ $value }} 次失败。检查 kubectl -n aiops get svc aisre-ingest"
+
+          - alert: IngestNotReceiving
+            expr: time() - ingest_last_receive_timestamp_seconds > 21600 and on() up{job="aisre-ingest"} == 1
+            for: 5m
+            labels: { severity: info, category: aiops }
+            annotations:
+              summary: "aisre-ingest 超过 6 小时未收到任何告警"
+              description: "阈值从 30 分钟改到 6 小时：实验间隙本来就没有告警，短阈值只会自己制造噪声（实测一晚刷出十几条）。要求 ingest 被抓取到才判断，避免服务未就绪时误报"
+
+          - alert: IngestScrapeDown
+            expr: up{job="aisre-ingest"} == 0
+            for: 2m
+            labels: { severity: warning, category: aiops }
+            annotations:
+              summary: "aisre-ingest 指标抓取失败（服务可能未就绪）"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: observability
+  labels: { app: prometheus }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      serviceAccountName: prometheus
+      nodeSelector: { kubernetes.io/hostname: k8s-obs }
+      securityContext: { fsGroup: 65534 }
+      initContainers:
+        - name: fix-perms
+          image: docker.io/library/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","mkdir -p /prometheus && chown -R 65534:65534 /prometheus && chmod 755 /prometheus"]
+          securityContext: { runAsUser: 0 }
+          volumeMounts:
+            - { name: data, mountPath: /prometheus }
+      containers:
+        - name: prometheus
+          image: quay.io/prometheus/prometheus:v2.55.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --storage.tsdb.retention.size=8GB
+            - --web.enable-lifecycle
+            - --web.enable-admin-api
+            - --web.listen-address=:9090
+          ports:
+            - { name: http, containerPort: 9090 }
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: 9090 }
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9090 }
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 768Mi }
+            limits:   { cpu: "1",  memory: 2Gi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+            - { name: data,   mountPath: /prometheus }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+        - name: data
+          hostPath: { path: /var/lib/aisre/prometheus, type: DirectoryOrCreate }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: observability
+  labels: { app: prometheus }
+spec:
+  type: NodePort
+  selector: { app: prometheus }
+  ports:
+    - { name: http, port: 9090, targetPort: 9090, nodePort: 30090 }

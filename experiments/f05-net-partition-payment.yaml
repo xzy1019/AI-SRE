@@ -1,0 +1,24 @@
+# F05 —— payment 网络分区（隔离）
+# 类型: NetworkChaos / partition ｜ 根因: payment-service
+# 预期: order 调 payment 直接失败（不是慢），错误率上升更快、更硬
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f05-net-partition-payment
+  namespace: chaos-mesh
+  labels: { experiment-id: F05, ground-truth: payment-service }
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: payment }
+  direction: both
+  target:
+    mode: all
+    selector:
+      namespaces: [demo-app]
+      labelSelectors: { app: order }
+  # 【时长校准】告警侧是 5m 速率窗口 + for: 2m/3m；故障短于判定时长会**结构性抓不住**（矩阵 F03/F04/F05 实测，见 docs/09 §4）。
+  #            本实验时长按 “≥ 6 分钟” 调整，确保规则有足够时间从 pending 走到 firing。
+  duration: '360s'

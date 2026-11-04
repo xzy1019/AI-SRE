@@ -1,0 +1,26 @@
+# F03 —— order 调用 payment 的网络延迟 800ms
+# 类型: NetworkChaos / delay ｜ 根因: order-service（网络路径）｜ 预期: order/frontend 延迟上升，payment 自身正常
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f03-net-delay-order
+  namespace: chaos-mesh
+  labels: { experiment-id: F03, ground-truth: order-service }
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: order }
+  direction: to
+  # 【2026-11-03 修正】原来这里带 target(select app=payment) —— 实测延迟**不生效**：
+  #   Chaos Mesh 把 target 解析成 **Pod IP** 并据此下发 netem，
+  #   而业务是调 `payment.demo-app.svc`（**ClusterIP**）→ 出向包目的地址是 ClusterIP，
+  #   规则匹配不上，于是 traffic 不受影响，但 chaos 对象照样报 AllInjected=True。
+  #   对照实测：带 target 时 order→payment = 0.010s；去掉 target 后 = 4.02s。
+  # 对照详见 docs/06-pitfalls.md P42。
+  # 去 target（延迟 order 全部出向）在本拓扑里等价：order 只调 payment 一个下游。
+  delay: { latency: '800ms', correlation: '100', jitter: '100ms' }
+  # 【时长校准】告警侧是 5m 速率窗口 + for: 2m/3m；故障短于判定时长会**结构性抓不住**（矩阵 F03/F04/F05 实测，见 docs/09 §4）。
+  #            本实验时长按 “≥ 6 分钟” 调整，确保规则有足够时间从 pending 走到 firing。
+  duration: '360s'

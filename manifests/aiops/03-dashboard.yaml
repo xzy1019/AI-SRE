@@ -1,0 +1,105 @@
+# ============================================================================
+# 03-dashboard.yaml —— AI SRE 图形化控制台（集群内运行）
+#
+# 设计要点：
+#   · 不构建自定义镜像：直接用节点上已有的 python:3.12-alpine（demo-app 同款），
+#     控制台代码由 ConfigMap 提供 —— 免 Docker、免镜像分发，改代码只需更新 CM + 重启
+#   · 数据分两类：静态快照（matrix/RCA，由 39 号脚本推进 ConfigMap）+ 实时（Prometheus/AM/Agent）
+#   · RBAC 只给"读"：nodes/pods 只读 + chaos CRD 只读
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aisre-dashboard
+  namespace: aiops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aisre-dashboard-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["chaos-mesh.org"]
+    resources: ["podchaos", "networkchaos", "stresschaos", "iochaos", "httpchaos", "timechaos"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aisre-dashboard-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aisre-dashboard-readonly
+subjects:
+  - kind: ServiceAccount
+    name: aisre-dashboard
+    namespace: aiops
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aisre-dashboard
+  namespace: aiops
+  labels: { app: aisre-dashboard }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: aisre-dashboard }
+  template:
+    metadata:
+      labels: { app: aisre-dashboard }
+    spec:
+      serviceAccountName: aisre-dashboard
+      # 用业务节点：python:3.12-alpine 已经在这两台节点上（demo-app 同款镜像），免拉取
+      nodeSelector:
+        kubernetes.io/hostname: k8s-app1
+      containers:
+        - name: dashboard
+          image: docker.io/library/python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/app/dashboard.py"]
+          args: ["--cluster", "--data", "/data", "--host", "0.0.0.0", "--port", "8787"]
+          env:
+            - { name: PROM_URL,   value: "http://prometheus.observability.svc:9090" }
+            - { name: AM_URL,     value: "http://alertmanager.observability.svc:9093" }
+            - { name: AGENT_URL,  value: "http://aisre-agent.aiops.svc:8080" }
+            - { name: INGEST_URL, value: "http://aisre-ingest.aiops.svc:8080" }
+          ports:
+            - { name: http, containerPort: 8787 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8787 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8787 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "20m", memory: "48Mi" }
+            limits:   { cpu: "300m", memory: "192Mi" }
+          volumeMounts:
+            - { name: code, mountPath: /app, readOnly: true }
+            - { name: data, mountPath: /data, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: aisre-dashboard-code }
+        - name: data
+          configMap: { name: aisre-dashboard-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aisre-dashboard
+  namespace: aiops
+  labels: { app: aisre-dashboard }
+spec:
+  type: NodePort
+  selector: { app: aisre-dashboard }
+  ports:
+    - name: http
+      port: 8787
+      targetPort: 8787
+      nodePort: 30088

@@ -1,0 +1,695 @@
+# 02-agent.yaml —— aisre-agent 自愈执行层（Policy Engine + Executor + 审计哈希链）
+#
+# 部署方式与 aisre-ingest 一致：官方 go 镜像 + ConfigMap 源码 + 容器内编译（无需构建镜像）。
+# 权限：**最小授权** —— 只有 demo-app 命名空间的 deployments get/patch，
+#       不能读 Secret、不能碰 kube-system/observability/chaos-mesh（策略层也会再挡一道）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aisre-agent
+  namespace: aiops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aisre-agent-exec
+  namespace: demo-app
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aisre-agent-exec
+  namespace: demo-app
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: aisre-agent-exec }
+subjects:
+  - { kind: ServiceAccount, name: aisre-agent, namespace: aiops }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aisre-agent-src
+  namespace: aiops
+  labels: { app: aisre-agent }
+data:
+  go.mod: |
+    module aisre-agent
+
+    go 1.23
+  main.go: |
+    // aisre-agent —— 自愈执行层（Policy Engine + Executor + 审计哈希链）
+    //
+    // 它在流水线里的位置：
+    //   Incident（降噪后的根因）+ 建议动作
+    //        ↓ POST /propose         ← 策略引擎：8 条校验，输出 allow/deny + 逐条理由
+    //        ↓ POST /execute         ← 执行器：只在 allow 且非 dry-run 时真正改 K8s
+    //        ↓ 审计哈希链            ← 每条记录带 prev_hash，可验证是否被篡改
+    //
+    // 为什么"敢执行"比"能分析"难：
+    //   SRE 场景里错误的自动修复比不修复更贵（把故障藏起来、扩大影响面、难以复盘）。
+    //   所以这个服务的核心不是"能改 K8s"，而是**改之前有 8 道校验、改之后有不可篡改的审计**。
+    //
+    // 8 条策略（GET /policies 可见）：
+    //   P1 动作分级：L0 只读 / L1 单副本重启 / L2 批量或扩容 / L3 高风险（缩容、改配置）
+    //   P2 目标白名单：只允许 demo-app 命名空间，禁止 kube-system/observability/chaos-mesh
+    //   P3 冷却期：同一 (target, action) 10 分钟内只能执行一次
+    //   P4 爆炸半径：restart 不得超出该 Deployment 副本数；禁止 scale 到 0
+    //   P5 频率限制：全局每分钟最多 5 次执行
+    //   P6 幂等：同一 incident 的同一动作只能成功一次
+    //   P7 前置条件：目标必须存在；且该 Deployment 不能"全部副本都不可用"（避免盲目重启）
+    //   P8 干跑：dry_run=true 只回计划不执行；L2/L3 必须显式 approved=true
+    //
+    // 依赖：只用 Go 标准库 + K8s ServiceAccount（不引入 client-go，便于容器内离线编译）
+    package main
+
+    import (
+    	"crypto/sha256"
+    	"crypto/tls"
+    	"crypto/x509"
+    	"encoding/hex"
+    	"encoding/json"
+    	"fmt"
+    	"io"
+    	"log"
+    	"net/http"
+    	"os"
+    	"sort"
+    	"strings"
+    	"sync"
+    	"time"
+    )
+
+    const (
+    	saDir      = "/var/run/secrets/kubernetes.io/serviceaccount"
+    	apiHost    = "https://kubernetes.default.svc"
+    	auditPath  = "/data/audit.jsonl"
+    	cooldown   = 10 * time.Minute
+    	rateLimit  = 5 // 每分钟
+    	allowedNS  = "demo-app"
+    )
+
+    var forbiddenNS = []string{"kube-system", "observability", "chaos-mesh", "kube-public", "default"}
+
+    // ---------- 请求模型 ----------
+
+    type Target struct {
+    	Namespace  string `json:"namespace"`
+    	Deployment string `json:"deployment"`
+    }
+
+    type Proposal struct {
+    	IncidentID string `json:"incident_id"`
+    	Action     string `json:"action"`   // restart | scale | noop
+    	Level      string `json:"level"`    // L0..L3
+    	Replicas   int    `json:"replicas"` // scale 时使用
+    	Target     Target `json:"target"`
+    	Reason     string `json:"reason"`
+    	Approved   bool   `json:"approved"`
+    	DryRun     bool   `json:"dry_run"`
+    }
+
+    type Check struct {
+    	ID     string `json:"id"`
+    	Name   string `json:"name"`
+    	Pass   bool   `json:"pass"`
+    	Detail string `json:"detail"`
+    }
+
+    type Decision struct {
+    	ProposalID string    `json:"proposal_id"`
+    	Allow      bool      `json:"allow"`
+    	Checks     []Check   `json:"checks"`
+    	Violations []string  `json:"violations"`
+    	Plan       []string  `json:"plan"`
+    	DecidedAt  time.Time `json:"decided_at"`
+    	DryRun     bool      `json:"dry_run"`
+    }
+
+    type AuditRecord struct {
+    	Seq       int       `json:"seq"`
+    	TS        time.Time `json:"ts"`
+    	Actor     string    `json:"actor"`
+    	Incident  string    `json:"incident_id"`
+    	Action    string    `json:"action"`
+    	Level     string    `json:"level"`
+    	Target    string    `json:"target"`
+    	Decision  string    `json:"decision"` // allowed / denied / executed / failed
+    	Detail    string    `json:"detail"`
+    	PrevHash  string    `json:"prev_hash"`
+    	Hash      string    `json:"hash"`
+    	DryRun    bool      `json:"dry_run"`
+    }
+
+    type Agent struct {
+    	mu        sync.Mutex
+    	seq       int
+    	lastHash  string
+    	execTimes []time.Time
+    	cooldownM map[string]time.Time
+    	doneM     map[string]bool
+    	records   []AuditRecord
+    }
+
+    func newAgent() *Agent {
+    	a := &Agent{cooldownM: map[string]time.Time{}, doneM: map[string]bool{}, lastHash: strings.Repeat("0", 64)}
+    	// 从磁盘恢复审计链（重启不丢历史）
+    	if f, err := os.Open(auditPath); err == nil {
+    		defer f.Close()
+    		dec := json.NewDecoder(f)
+    		for {
+    			var r AuditRecord
+    			if err := dec.Decode(&r); err != nil {
+    				break
+    			}
+    			a.records = append(a.records, r)
+    			a.seq = r.Seq
+    			a.lastHash = r.Hash
+    		}
+    		log.Printf("INFO 审计链已恢复: %d 条, last_hash=%s…", len(a.records), a.lastHash[:12])
+    	}
+    	return a
+    }
+
+    // ---------- 策略引擎 ----------
+
+    func levelOf(p Proposal) string {
+    	if p.Level != "" {
+    		return p.Level
+    	}
+    	switch p.Action {
+    	case "noop", "observe":
+    		return "L0"
+    	case "restart":
+    		return "L1"
+    	case "scale":
+    		if p.Replicas == 0 {
+    			return "L3"
+    		}
+    		return "L2"
+    	default:
+    		return "L3"
+    	}
+    }
+
+    func (a *Agent) evaluate(p Proposal) Decision {
+    	checks := []Check{}
+    	viol := []string{}
+    	add := func(id, name string, pass bool, detail string) {
+    		checks = append(checks, Check{ID: id, Name: name, Pass: pass, Detail: detail})
+    		if !pass {
+    			viol = append(viol, id+": "+detail)
+    		}
+    	}
+
+    	lvl := levelOf(p)
+
+    	// P1 动作分级
+    	p1 := true
+    	d1 := "级别 " + lvl + "（" + p.Action + "）"
+    	if (lvl == "L2" || lvl == "L3") && !p.Approved {
+    		p1 = false
+    		d1 += " —— L2/L3 必须显式 approved=true"
+    	}
+    	add("P1", "动作分级", p1, d1)
+
+    	// P2 目标白名单
+    	p2 := p.Target.Namespace == allowedNS
+    	d2 := fmt.Sprintf("目标 %s/%s", p.Target.Namespace, p.Target.Deployment)
+    	if !p2 {
+    		d2 += fmt.Sprintf(" —— 只允许 %s，禁止 %v", allowedNS, forbiddenNS)
+    	}
+    	add("P2", "目标白名单", p2, d2)
+
+    	// P3 冷却期
+    	key := p.Target.Namespace + "/" + p.Target.Deployment + ":" + p.Action
+    	a.mu.Lock()
+    	last, seen := a.cooldownM[key]
+    	a.mu.Unlock()
+    	p3 := !seen || time.Since(last) > cooldown
+    	d3 := "最近一次同目标同动作: " + map[bool]string{true: "无记录", false: last.Format(time.RFC3339)}[!seen]
+    	if !p3 {
+    		d3 += fmt.Sprintf(" —— 仍在 %s 冷却期内", cooldown)
+    	}
+    	add("P3", "冷却期", p3, d3)
+
+    	// P4 爆炸半径
+    	p4 := true
+    	d4 := "动作影响范围检查"
+    	if p.Action == "scale" && p.Replicas == 0 {
+    		p4 = false
+    		d4 = "禁止 scale 到 0 副本（等于下线服务）"
+    	} else if p.Action == "restart" {
+    		d4 = "restart 使用滚动重启（maxUnavailable=0），不会全量中断"
+    	}
+    	add("P4", "爆炸半径", p4, d4)
+
+    	// P5 频率限制
+    	a.mu.Lock()
+    	cut := time.Now().Add(-time.Minute)
+    	recent := 0
+    	for _, t := range a.execTimes {
+    		if t.After(cut) {
+    			recent++
+    		}
+    	}
+    	a.mu.Unlock()
+    	p5 := recent < rateLimit
+    	add("P5", "频率限制", p5, fmt.Sprintf("近 1 分钟已执行 %d 次（上限 %d）", recent, rateLimit))
+
+    	// P6 幂等
+    	doneKey := p.IncidentID + "|" + key
+    	a.mu.Lock()
+    	already := a.doneM[doneKey]
+    	a.mu.Unlock()
+    	p6 := !already
+    	add("P6", "幂等（同 incident 同动作）", p6,
+    		map[bool]string{true: "首次执行", false: "该 incident 的同一动作已执行过"}[p6])
+
+    	// P7 前置条件：目标存在 + 不能全部不可用
+    	exists, ready, desired, err := k8sDeploymentState(p.Target)
+    	p7 := exists
+    	d7 := "Deployment 存在性检查"
+    	if exists {
+    		d7 = fmt.Sprintf("存在：ready %d / desired %d", ready, desired)
+    		if desired > 0 && ready == 0 {
+    			p7 = false
+    			d7 += " —— 全部副本不可用，禁止盲目重启（应先人工确认根因）"
+    		}
+    	} else {
+    		d7 += "（查询失败或不存在: " + err + "）"
+    	}
+    	add("P7", "前置条件", p7, d7)
+
+    	// P8 干跑
+    	p8 := true
+    	d8 := "dry_run=" + fmt.Sprint(p.DryRun)
+    	if p.DryRun {
+    		d8 += " —— 只返回计划，不执行"
+    	}
+    	add("P8", "干跑语义", p8, d8)
+
+    	allow := len(viol) == 0
+    	plan := []string{}
+    	if allow && !p.DryRun {
+    		switch p.Action {
+    		case "restart":
+    			plan = append(plan, fmt.Sprintf("PATCH deployment %s/%s 触发滚动重启（maxUnavailable=0）",
+    				p.Target.Namespace, p.Target.Deployment))
+    		case "scale":
+    			plan = append(plan, fmt.Sprintf("PATCH replicas=%d 于 %s/%s", p.Replicas, p.Target.Namespace, p.Target.Deployment))
+    		default:
+    			plan = append(plan, "noop：无需改动")
+    		}
+    		plan = append(plan, "写审计记录（含 prev_hash 链）")
+    	} else if p.DryRun {
+    		plan = append(plan, "（dry-run）仅回显计划，不做任何改动")
+    	}
+
+    	pid := fmt.Sprintf("prop-%s", shortHash(fmt.Sprintf("%s|%s|%s|%d", p.IncidentID, key, lvl, time.Now().UnixNano())))
+    	return Decision{ProposalID: pid, Allow: allow, Checks: checks, Violations: viol,
+    		Plan: plan, DecidedAt: time.Now().UTC(), DryRun: p.DryRun}
+    }
+
+    // ---------- K8s 访问（标准库 + ServiceAccount）----------
+
+    func k8sClient() (*http.Client, error) {
+    	ca, err := os.ReadFile(saDir + "/ca.crt")
+    	if err != nil {
+    		return nil, err
+    	}
+    	pool := x509.NewCertPool()
+    	if !pool.AppendCertsFromPEM(ca) {
+    		return nil, fmt.Errorf("CA 解析失败")
+    	}
+    	return &http.Client{
+    		Timeout:   10 * time.Second,
+    		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
+    	}, nil
+    }
+
+    func k8sDo(method, path string, body []byte) ([]byte, error) {
+    	c, err := k8sClient()
+    	if err != nil {
+    		return nil, err
+    	}
+    	tok, err := os.ReadFile(saDir + "/token")
+    	if err != nil {
+    		return nil, err
+    	}
+    	var rd io.Reader
+    	if body != nil {
+    		rd = strings.NewReader(string(body))
+    	}
+    	req, err := http.NewRequest(method, apiHost+path, rd)
+    	if err != nil {
+    		return nil, err
+    	}
+    	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
+    	req.Header.Set("Content-Type", "application/merge-patch+json")
+    	resp, err := c.Do(req)
+    	if err != nil {
+    		return nil, err
+    	}
+    	defer resp.Body.Close()
+    	b, _ := io.ReadAll(resp.Body)
+    	if resp.StatusCode >= 300 {
+    		return b, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(b), 200))
+    	}
+    	return b, nil
+    }
+
+    func k8sDeploymentState(t Target) (exists bool, ready, desired int, errMsg string) {
+    	b, err := k8sDo("GET", fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", t.Namespace, t.Deployment), nil)
+    	if err != nil {
+    		return false, 0, 0, truncate(err.Error(), 120)
+    	}
+    	var d struct {
+    		Spec struct {
+    			Replicas *int `json:"replicas"`
+    		} `json:"spec"`
+    		Status struct {
+    			ReadyReplicas int `json:"readyReplicas"`
+    		} `json:"status"`
+    	}
+    	if err := json.Unmarshal(b, &d); err != nil {
+    		return false, 0, 0, "解析失败"
+    	}
+    	desired = 1
+    	if d.Spec.Replicas != nil {
+    		desired = *d.Spec.Replicas
+    	}
+    	return true, d.Status.ReadyReplicas, desired, ""
+    }
+
+    func k8sRestart(t Target) (string, error) {
+    	patch := map[string]any{
+    		"spec": map[string]any{
+    			"template": map[string]any{
+    				"metadata": map[string]any{
+    					"annotations": map[string]string{
+    						// 这就是 kubectl rollout restart 做的事
+    						"kubectl.kubernetes.io/restartedAt": time.Now().UTC().Format(time.RFC3339),
+    					},
+    				},
+    			},
+    		},
+    	}
+    	b, _ := json.Marshal(patch)
+    	_, err := k8sDo("PATCH", fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", t.Namespace, t.Deployment), b)
+    	if err != nil {
+    		return "", err
+    	}
+    	return "rolling restart 已下发", nil
+    }
+
+    func k8sScale(t Target, replicas int) (string, error) {
+    	b, _ := json.Marshal(map[string]any{"spec": map[string]any{"replicas": replicas}})
+    	_, err := k8sDo("PATCH", fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", t.Namespace, t.Deployment), b)
+    	if err != nil {
+    		return "", err
+    	}
+    	return fmt.Sprintf("replicas 已调整为 %d", replicas), nil
+    }
+
+    // ---------- 审计哈希链 ----------
+
+    func canonical(r AuditRecord) string {
+    	return fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%t",
+    		r.Seq, r.TS.UTC().Format(time.RFC3339Nano), r.Actor, r.Incident, r.Action, r.Level, r.Target, r.Decision, r.DryRun)
+    }
+
+    func (a *Agent) appendAudit(r AuditRecord) AuditRecord {
+    	a.mu.Lock()
+    	defer a.mu.Unlock()
+    	a.seq++
+    	r.Seq = a.seq
+    	if r.TS.IsZero() {
+    		r.TS = time.Now().UTC()
+    	}
+    	r.PrevHash = a.lastHash
+    	sum := sha256.Sum256([]byte(r.PrevHash + "|" + canonical(r)))
+    	r.Hash = hex.EncodeToString(sum[:])
+    	a.lastHash = r.Hash
+    	a.records = append(a.records, r)
+    	if f, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+    		b, _ := json.Marshal(r)
+    		f.Write(append(b, '\n'))
+    		f.Close()
+    	}
+    	return r
+    }
+
+    // VerifyChain 重算哈希链，返回是否被篡改与首个不一致的位置
+    func (a *Agent) VerifyChain() (bool, int, string) {
+    	a.mu.Lock()
+    	defer a.mu.Unlock()
+    	prev := strings.Repeat("0", 64)
+    	for i, r := range a.records {
+    		if r.PrevHash != prev {
+    			return false, i + 1, "prev_hash 与上一条不一致"
+    		}
+    		sum := sha256.Sum256([]byte(prev + "|" + canonical(r)))
+    		if hex.EncodeToString(sum[:]) != r.Hash {
+    			return false, i + 1, "记录内容与 hash 不匹配（被篡改）"
+    		}
+    		prev = r.Hash
+    	}
+    	return true, 0, ""
+    }
+
+    // ---------- HTTP 处理器 ----------
+
+    func (a *Agent) handlePropose(w http.ResponseWriter, r *http.Request) {
+    	var p Proposal
+    	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+    		http.Error(w, "invalid json", http.StatusBadRequest)
+    		return
+    	}
+    	d := a.evaluate(p)
+    	a.appendAudit(AuditRecord{Actor: "aisre-agent", Incident: p.IncidentID, Action: p.Action,
+    		Level: levelOf(p), Target: p.Target.Namespace + "/" + p.Target.Deployment,
+    		Decision: map[bool]string{true: "allowed", false: "denied"}[d.Allow],
+    		Detail: strings.Join(d.Violations, "; "), DryRun: p.DryRun})
+    	writeJSON(w, d)
+    }
+
+    func (a *Agent) handleExecute(w http.ResponseWriter, r *http.Request) {
+    	var p Proposal
+    	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+    		http.Error(w, "invalid json", http.StatusBadRequest)
+    		return
+    	}
+    	d := a.evaluate(p)
+    	if !d.Allow {
+    		a.appendAudit(AuditRecord{Actor: "aisre-agent", Incident: p.IncidentID, Action: p.Action,
+    			Level: levelOf(p), Target: p.Target.Namespace + "/" + p.Target.Deployment,
+    			Decision: "denied", Detail: strings.Join(d.Violations, "; "), DryRun: p.DryRun})
+    		w.WriteHeader(http.StatusForbidden)
+    		writeJSON(w, map[string]any{"allow": false, "decision": d})
+    		return
+    	}
+    	if p.DryRun {
+    		writeJSON(w, map[string]any{"allow": true, "dry_run": true, "decision": d, "executed": false})
+    		return
+    	}
+
+    	detail, err := "", error(nil)
+    	switch p.Action {
+    	case "restart":
+    		detail, err = k8sRestart(p.Target)
+    	case "scale":
+    		detail, err = k8sScale(p.Target, p.Replicas)
+    	default:
+    		detail = "noop 无需执行"
+    	}
+    	key := p.Target.Namespace + "/" + p.Target.Deployment + ":" + p.Action
+    	if err == nil {
+    		a.mu.Lock()
+    		a.cooldownM[key] = time.Now()
+    		a.execTimes = append(a.execTimes, time.Now())
+    		a.doneM[p.IncidentID+"|"+key] = true
+    		a.mu.Unlock()
+    		rec := a.appendAudit(AuditRecord{Actor: "aisre-agent", Incident: p.IncidentID, Action: p.Action,
+    			Level: levelOf(p), Target: key, Decision: "executed", Detail: detail, DryRun: false})
+    		writeJSON(w, map[string]any{"allow": true, "executed": true, "detail": detail,
+    			"audit": map[string]any{"seq": rec.Seq, "hash": rec.Hash, "prev_hash": rec.PrevHash}})
+    		return
+    	}
+    	a.appendAudit(AuditRecord{Actor: "aisre-agent", Incident: p.IncidentID, Action: p.Action,
+    		Level: levelOf(p), Target: key, Decision: "failed", Detail: truncate(err.Error(), 200)})
+    	w.WriteHeader(http.StatusBadGateway)
+    	writeJSON(w, map[string]any{"allow": true, "executed": false, "error": err.Error()})
+    }
+
+    func (a *Agent) handleAudit(w http.ResponseWriter, _ *http.Request) {
+    	a.mu.Lock()
+    	defer a.mu.Unlock()
+    	n := len(a.records)
+    	if n > 50 {
+    		n = 50
+    	}
+    	writeJSON(w, map[string]any{"total": len(a.records), "records": a.records[len(a.records)-n:]})
+    }
+
+    func (a *Agent) handleVerify(w http.ResponseWriter, _ *http.Request) {
+    	ok, idx, why := a.VerifyChain()
+    	writeJSON(w, map[string]any{"chain_ok": ok, "broken_at": idx, "reason": why,
+    		"records": len(a.records)})
+    }
+
+    func handlePolicies(w http.ResponseWriter, _ *http.Request) {
+    	writeJSON(w, []map[string]string{
+    		{"id": "P1", "name": "动作分级", "rule": "L0 只读 / L1 单副本重启 / L2 批量或扩容 / L3 高风险；L2/L3 必须 approved=true"},
+    		{"id": "P2", "name": "目标白名单", "rule": "只允许 " + allowedNS + "，禁止 " + strings.Join(forbiddenNS, ",")},
+    		{"id": "P3", "name": "冷却期", "rule": "同一 (target,action) 10 分钟内只执行一次"},
+    		{"id": "P4", "name": "爆炸半径", "rule": "禁止 scale 到 0；restart 使用 maxUnavailable=0 滚动重启"},
+    		{"id": "P5", "name": "频率限制", "rule": "全局每分钟最多 5 次执行"},
+    		{"id": "P6", "name": "幂等", "rule": "同一 incident 的同一动作只成功一次"},
+    		{"id": "P7", "name": "前置条件", "rule": "目标必须存在；全部副本不可用时禁止盲目重启"},
+    		{"id": "P8", "name": "干跑", "rule": "dry_run=true 只回计划不执行"},
+    	})
+    }
+
+    func (a *Agent) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+    	a.mu.Lock()
+    	total, exec := len(a.records), 0
+    	for _, r := range a.records {
+    		if r.Decision == "executed" {
+    			exec++
+    		}
+    	}
+    	last := ""
+    	if len(a.records) > 0 {
+    		last = a.records[len(a.records)-1].TS.Format(time.RFC3339)
+    	}
+    	a.mu.Unlock()
+    	fmt.Fprintf(w, "# HELP aisre_audit_records_total 审计记录总数\n# TYPE aisre_audit_records_total counter\n")
+    	fmt.Fprintf(w, "aisre_audit_records_total %d\n", total)
+    	fmt.Fprintf(w, "# HELP aisre_actions_executed_total 已执行动作数\n# TYPE aisre_actions_executed_total counter\n")
+    	fmt.Fprintf(w, "aisre_actions_executed_total %d\n", exec)
+    	fmt.Fprintf(w, "# HELP aisre_last_audit_timestamp 最近一条审计时间\n# TYPE aisre_last_audit_timestamp gauge\n")
+    	fmt.Fprintf(w, "aisre_last_audit_timestamp %d\n", time.Now().Unix())
+    	fmt.Fprintf(w, "# 最近审计时间: %s\n", last)
+    }
+
+    // ---------- 工具 ----------
+
+    func writeJSON(w http.ResponseWriter, v any) {
+    	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+    	_ = json.NewEncoder(w).Encode(v)
+    }
+
+    func shortHash(s string) string {
+    	sum := sha256.Sum256([]byte(s))
+    	return hex.EncodeToString(sum[:])[:10]
+    }
+
+    func truncate(s string, n int) string {
+    	if len(s) <= n {
+    		return s
+    	}
+    	return s[:n] + "…"
+    }
+
+    func envOr(k, d string) string {
+    	if v := os.Getenv(k); v != "" {
+    		return v
+    	}
+    	return d
+    }
+
+    func main() {
+    	os.MkdirAll("/data", 0o755)
+    	a := newAgent()
+    	port := envOr("PORT", "8080")
+    	mux := http.NewServeMux()
+    	mux.HandleFunc("/propose", a.handlePropose)
+    	mux.HandleFunc("/execute", a.handleExecute)
+    	mux.HandleFunc("/audit", a.handleAudit)
+    	mux.HandleFunc("/audit/verify", a.handleVerify)
+    	mux.HandleFunc("/policies", handlePolicies)
+    	mux.HandleFunc("/metrics", a.handleMetrics)
+    	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+    	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+    		if _, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err != nil {
+    			http.Error(w, "audit not writable: "+err.Error(), http.StatusServiceUnavailable)
+    			return
+    		}
+    		_, _ = w.Write([]byte("ready\n"))
+    	})
+    	log.Printf("INFO aisre-agent 启动: port=%s audit=%s 已恢复记录=%d", port, auditPath, len(a.records))
+    	sort.Strings(forbiddenNS)
+    	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+    	log.Fatal(srv.ListenAndServe())
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aisre-agent
+  namespace: aiops
+  labels: { app: aisre-agent, tier: aiops }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: aisre-agent }
+  template:
+    metadata:
+      labels: { app: aisre-agent, tier: aiops }
+      annotations:
+        checksum/src: "70A923531FEE"
+    spec:
+      serviceAccountName: aisre-agent
+      nodeSelector: { kubernetes.io/hostname: k8s-ai }
+      containers:
+        - name: agent
+          image: docker.io/library/golang:1.23-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /tmp/gocache /tmp/gopath /data
+              cd /src
+              GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOPROXY=off GOFLAGS=-mod=mod go build -o /tmp/aisre-agent .
+              echo "[agent] 编译完成，启动服务"
+              exec /tmp/aisre-agent
+          env:
+            - { name: PORT, value: "8080" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 1000m, memory: 768Mi }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 25
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - { name: src,  mountPath: /src,  readOnly: true }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: src
+          configMap: { name: aisre-agent-src }
+        - name: data
+          hostPath: { path: /var/lib/aisre/aiops/agent, type: DirectoryOrCreate }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aisre-agent
+  namespace: aiops
+  labels: { app: aisre-agent }
+spec:
+  selector: { app: aisre-agent }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

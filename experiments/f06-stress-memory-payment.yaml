@@ -1,0 +1,27 @@
+# F06 —— payment 内存压力 200MB（容器 limit 384Mi，逼近 OOM）
+# 类型: StressChaos / memory ｜ 根因: payment-service
+# 预期: 容器内存接近 limit → 可能被 OOMKilled → 重启次数上升（对应 PodRestartingFrequently 告警）
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: f06-stress-memory-payment
+  namespace: chaos-mesh
+  labels: { experiment-id: F06, ground-truth: payment-service }
+spec:
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: payment }
+  stressors:
+    # 【2026-11-03 校准】原来是 200MB：实测 payment 应用自身仅 ~30MiB，limit 384MiB，
+    #   200MiB + 30MiB = 230MiB 远低于 limit → 压不到 OOM，三轮重复 0/3 触发（P50）。
+    #   现改为 320MB：应用约 30MiB + 压力 320MiB ≈ 350MiB ≈ limit 的 91%，
+    #   稳定落在 ContainerMemoryHigh（>85%）的判定区间内 —— 且**不需要**恰好被 OOMKilled。
+    # 【2026-11-03 二次校准】320MB 实测只到 **83.5%**（差一点没过 85% 阈值）：
+    #   320MB(十进制)=305MiB，加应用自身 ~15MiB = 320MiB ≈ 384MiB 的 83.5%。
+    #   改 360MB(=343MiB)：343+15 ≈ 358MiB ≈ **93%** —— 稳定落在 ContainerMemoryHigh(>85%) 区间，
+    #   且仍低于 limit（不制造 OOM），保证告警能持续到 `for: 2m` 满足。
+    memory: { workers: 1, size: '360MB' }
+  # 【时长校准】告警侧是 5m 速率窗口 + for: 2m/3m；故障短于判定时长会**结构性抓不住**（矩阵 F03/F04/F05 实测，见 docs/09 §4）。
+  #            本实验时长按 “≥ 6 分钟” 调整，确保规则有足够时间从 pending 走到 firing。
+  duration: '360s'

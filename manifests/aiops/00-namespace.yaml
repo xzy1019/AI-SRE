@@ -1,0 +1,20 @@
+# aiops 命名空间：AIOps 分析层组件（Ingestion / 降噪 / RCA / Agent）都放这里。
+# 与 observability（采集与存储）、demo-app（被测业务）分开，
+# 是为了让"只读分析层"和"可写业务层"在资源与权限上天然隔离 —— 见设计文档 §3.3。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops
+  labels:
+    app.kubernetes.io/part-of: aisre-agent
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: aiops-limits
+  namespace: aiops
+spec:
+  limits:
+    - type: Container
+      default:        { cpu: 500m, memory: 512Mi }
+      defaultRequest: { cpu: 50m,  memory: 64Mi }

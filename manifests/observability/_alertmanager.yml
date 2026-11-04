@@ -1,0 +1,20 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: aisre-webhook
+  group_by: ["alertname","namespace","service"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 4h
+  routes:
+    - match: { severity: critical }
+      receiver: aisre-webhook
+      group_wait: 5s
+      repeat_interval: 1h
+
+receivers:
+  - name: aisre-webhook
+    webhook_configs:
+      - url: http://aisre-ingest.aiops.svc:8080/webhook/alertmanager
+        send_resolved: true

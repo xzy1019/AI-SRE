@@ -1,0 +1,65 @@
+# ============================================================
+# F14 —— 多根因并发（3 个独立服务同时失效，用于压出"过度合并率"）
+#
+# 故障组合（同时注入，180s）:
+#   ① payment  全副本不可用   → 级联链 payment → order → frontend
+#   ② redis    全副本不可用   → payment 的**依赖**失败
+#   ③ postgres 全副本不可用   → payment 的**另一个依赖**失败
+#
+# 真实根因集合（ground truth）: payment-service, redis-service, postgres-service
+#
+# 为什么这三个组合是"多根因"而不是"一条链"：
+#   payment 是链的汇聚点（order 调它），而 redis/postgres 是 payment 的**并列依赖**。
+#   三者之间没有调用关系（拓扑里是同层），所以它们是 3 个独立根因，不是级联。
+#   一个只会"沿链下钻"的降噪器会把三个都收敛到同一个服务（过度合并）；
+#   一个合格的实现应当识别出 **3 个不同根因**。
+#
+# 预期：
+#   · 3 个 ScrapeDown（payment/redis/postgres 各自指标消失）
+#   · 2 个 DependencyDown（payment→redis、payment→postgres）
+#   · 1~2 个 DownstreamFailure + HighErrorRate（order/frontend 被波及）
+#   · 降噪应把它们收敛到 **3 个簇**（而不是 1 个），且每个簇的候选集合以对应服务为主
+#
+# 使用: bash run-experiment.sh f14-multi-root.yaml 240
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f14a-pod-failure-payment
+  namespace: chaos-mesh
+  labels: { experiment-id: F14, ground-truth: payment-service }
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: payment }
+  duration: '360s'
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f14b-pod-failure-redis
+  namespace: chaos-mesh
+  labels: { experiment-id: F14, ground-truth: redis-service }
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: redis }
+  duration: '360s'
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f14c-pod-failure-postgres
+  namespace: chaos-mesh
+  labels: { experiment-id: F14, ground-truth: postgres-service }
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: postgres }
+  duration: '360s'

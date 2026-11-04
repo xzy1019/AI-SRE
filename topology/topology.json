@@ -1,0 +1,116 @@
+{
+  "collected_at": "2026-11-02T08:11:26Z",
+  "namespace": "demo-app",
+  "sources": [
+    "deployment-env:DOWNSTREAM_NAME",
+    "deployment-env:DB_HOST/REDIS_HOST",
+    "kubectl:svc",
+    "kubectl:endpoints"
+  ],
+  "nodes": {
+    "frontend": {
+      "kind": "service",
+      "replicas": 2,
+      "tier": "edge",
+      "labels": {
+        "app": "frontend"
+      },
+      "ports": [
+        8080
+      ],
+      "selector": {
+        "app": "frontend"
+      },
+      "ready_endpoints": 2
+    },
+    "loadgen": {
+      "kind": "deployment",
+      "replicas": 1,
+      "tier": null,
+      "labels": {
+        "app": "loadgen"
+      }
+    },
+    "order": {
+      "kind": "service",
+      "replicas": 2,
+      "tier": "core",
+      "labels": {
+        "app": "order"
+      },
+      "ports": [
+        8080
+      ],
+      "selector": {
+        "app": "order"
+      },
+      "ready_endpoints": 2
+    },
+    "payment": {
+      "kind": "service",
+      "replicas": 2,
+      "tier": "core",
+      "labels": {
+        "app": "payment"
+      },
+      "ports": [
+        8080
+      ],
+      "selector": {
+        "app": "payment"
+      },
+      "ready_endpoints": 2
+    },
+    "redis": {
+      "kind": "service",
+      "replicas": 1,
+      "tier": "data",
+      "labels": {
+        "app": "redis"
+      },
+      "ports": [
+        6379
+      ],
+      "selector": {
+        "app": "redis"
+      },
+      "ready_endpoints": 1
+    },
+    "postgres": {
+      "kind": "service",
+      "ports": [
+        5432
+      ],
+      "selector": {
+        "app": "postgres"
+      },
+      "ready_endpoints": 1
+    }
+  },
+  "edges": [
+    {
+      "from": "frontend",
+      "to": "order",
+      "type": "call",
+      "source": "deploy-env:DOWNSTREAM_NAME"
+    },
+    {
+      "from": "order",
+      "to": "payment",
+      "type": "call",
+      "source": "deploy-env:DOWNSTREAM_NAME"
+    },
+    {
+      "from": "payment",
+      "to": "postgres",
+      "type": "dependency",
+      "source": "deploy-env:DB_HOST"
+    },
+    {
+      "from": "payment",
+      "to": "redis",
+      "type": "dependency",
+      "source": "deploy-env:REDIS_HOST"
+    }
+  ]
+}

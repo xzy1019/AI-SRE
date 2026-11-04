@@ -1,0 +1,36 @@
+# ============================================================
+# F01 —— payment-service 全部副本被杀（单故障实验）
+#
+# 故障类型 : PodChaos / pod-kill
+# 目标     : demo-app/payment（mode: all —— 一次性杀掉全部副本）
+# 真实根因 : payment-service
+#
+# 为什么用 mode: all 而不是 one：
+#   payment 有 2 个副本，只杀 1 个的话 Service 仍有可用端点，
+#   业务侧 5xx 为 0、告警不会触发 —— 那是"冗余生效"，不是故障暴露。
+#   第 1 周的目标是验证「注入 → 指标/日志/告警都能采集到」，
+#   所以这里一次性打掉全部副本，制造一个确定的错误窗口：
+#     · payment 抓取目标消失  → DemoAppScrapeDown
+#     · order 调用 payment 失败 → DemoAppDownstreamFailure
+#     · frontend 透传到用户      → DemoAppHighErrorRate
+#   冗余场景（mode: one）留给后续依赖降噪算法去"抑制",是另一个实验目的。
+#
+# 使用: bash run-experiment.sh f01-pod-kill-payment.yaml 120
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f01-pod-kill-payment
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F01
+    ground-truth: payment-service
+spec:
+  action: pod-kill
+  mode: all
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: payment
+  duration: '30s'

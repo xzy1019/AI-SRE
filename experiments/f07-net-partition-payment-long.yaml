@@ -1,0 +1,22 @@
+# F07 —— payment 网络分区（加长版，5 分钟）
+# 目的：验证 F05 的"零告警"是"故障太短 + 低流量保护"造成的盲区，而不是注入没生效。
+# 与 F05 唯一区别：duration 120s -> 300s（覆盖 for: 2m + 5m rate 窗口的积累过程）
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f07-net-partition-payment-long
+  namespace: chaos-mesh
+  labels: { experiment-id: F07, ground-truth: payment-service }
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: payment }
+  direction: both
+  target:
+    mode: all
+    selector:
+      namespaces: [demo-app]
+      labelSelectors: { app: order }
+  duration: '300s'

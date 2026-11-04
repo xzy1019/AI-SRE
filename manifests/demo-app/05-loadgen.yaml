@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: demo-app
+  labels: { app: loadgen }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: loadgen }
+  template:
+    metadata:
+      labels: { app: loadgen }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: k8s-app1 }
+      containers:
+        - name: loadgen
+          image: docker.io/library/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c"]
+          args:
+            - |
+              echo "[loadgen] 启动，目标 http://frontend.demo-app.svc:8080"
+              i=0
+              while true; do
+                i=$((i+1))
+                # 大部分请求走正常路径，少量带随机延迟
+                if [ $((i % 20)) -eq 0 ]; then
+                  URL="http://frontend.demo-app.svc:8080/?ms=120"
+                else
+                  URL="http://frontend.demo-app.svc:8080/"
+                fi
+                CODE=$(wget -q -O /dev/null -T 5 --server-response "$URL" 2>&1 | awk '/HTTP\//{print $2; exit}')
+                [ -z "$CODE" ] && CODE="ERR"
+                if [ $((i % 30)) -eq 0 ]; then
+                  echo "[loadgen] req#$i -> $CODE"
+                fi
+                sleep 0.4
+              done
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 96Mi }

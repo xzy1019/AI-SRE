@@ -1,0 +1,73 @@
+# ============================================================
+# F13 —— 级联故障（两个根因，用于验证降噪的"合并/不过度合并"）
+#
+# 故障组合（同时注入，180s）:
+#   ① payment 全副本不可用      → 级联链：payment → order → frontend
+#   ② order 网络延迟 500ms      → 同一条链上的第二处异常（症状叠加）
+#   ③ redis 全副本不可用        → 独立根因（与 payment 链不同的故障源）
+#
+# 真实根因集合（ground truth）: payment-service, redis-service
+#
+# 为什么这么设计：
+#   · 一条级联链必须被合并成 1 个事件簇（否则值班人还是要看 4 条）
+#   · 独立根因（redis）必须**不能**被并进 payment 簇（否则就是"过度合并"，
+#     这是比"降噪不够"更危险的错误——它会把两个故障误导成一个）
+#   · 一次实验同时检验"合该合的"和"不合不该合的"
+#
+# 使用: bash run-experiment.sh f13-cascading.yaml 240
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f13a-pod-failure-payment
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F13
+    ground-truth: payment-service
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: payment }
+  duration: '360s'
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f13b-net-delay-order
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F13
+    ground-truth: order-service
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: order }
+  delay:
+    latency: '500ms'
+    correlation: '100'
+    jitter: '100ms'
+  direction: to
+  # 【2026-11-04 修正】原写法带 target(select app=payment) —— 就是 P42 那个坑：
+  #   业务调的是 Service ClusterIP，而 target 按 Pod IP 下发 netem → 规则匹配不上、**延迟不生效**。
+  #   去掉 target（延迟 order 全部出向）在本拓扑里等价：order 只调 payment 一个下游。
+  duration: '360s'
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f13c-pod-failure-redis
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F13
+    ground-truth: redis-service
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces: [demo-app]
+    labelSelectors: { app: redis }
+  duration: '360s'

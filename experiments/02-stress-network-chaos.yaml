@@ -1,0 +1,81 @@
+# ============================================================
+# F04 —— postgres CPU 压力（数据层故障，级联到 payment）
+# 故障类型: StressChaos / cpu
+# 真实根因: postgres（数据层）
+# 预期现象: payment 的 DB 探测变慢 -> payment 延迟上升 -> order/frontend 级联变慢
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: f04-stress-postgres
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F04
+    ground-truth: postgres
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: postgres
+  stressors:
+    cpu:
+      workers: 2
+      load: 80
+  duration: '120s'
+---
+# ============================================================
+# F05 —— 级联故障：postgres 慢 + payment 压力（用于验证降噪）
+# 真实根因: 双根因（postgres + payment）
+# 目的: 制造远超单故障的告警量，验证降噪能力
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: f05a-stress-payment
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F05
+    ground-truth: payment-service
+spec:
+  mode: all
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: payment
+  stressors:
+    cpu:
+      workers: 1
+      load: 90
+  duration: '120s'
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f05b-net-delay-pg
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F05
+    ground-truth: postgres
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: payment
+  direction: to
+  target:
+    mode: all
+    selector:
+      namespaces:
+        - demo-app
+      labelSelectors:
+        app: postgres
+  delay:
+    latency: '300ms'
+    correlation: '100'
+  duration: '120s'

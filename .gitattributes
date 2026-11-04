@@ -1,0 +1,19 @@
+# 统一行尾，避免跨平台协作时的"全文件 diff"
+* text=auto eol=lf
+
+# Windows 专用脚本保留 CRLF（PowerShell 5.1 对 BOM/行尾敏感，见 docs/06 P37/P48）
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制不做行尾转换
+*.png binary
+*.jpg binary
+*.pdf binary
+*.tar.gz binary
+*.gguf binary
+
+# 语言识别
+*.go linguist-language=Go
+*.py linguist-language=Python
+*.sh linguist-language=Shell
+*.ps1 linguist-language=PowerShell

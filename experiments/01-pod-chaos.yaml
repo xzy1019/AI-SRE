@@ -1,0 +1,76 @@
+# ============================================================
+# F01 —— payment-service Pod 被杀
+# 故障类型: PodChaos / pod-kill
+# 目标: demo-app/payment
+# 真实根因（ground truth）: payment-service
+# 预期现象: payment Pod 重建；frontend/order 在重建窗口内出现 5xx
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f01-pod-kill-payment
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F01
+    ground-truth: payment-service
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: payment
+  duration: '30s'
+---
+# ============================================================
+# F02 —— payment-service 持续不可用（用于制造稳定的错误窗口）
+# 故障类型: PodChaos / pod-failure
+# 真实根因: payment-service
+# 与 F01 的区别: pod-failure 让 Pod 在时长内持续不可用，而非一次性杀掉
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f02-pod-failure-payment
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F02
+    ground-truth: payment-service
+spec:
+  action: pod-failure
+  mode: one
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: payment
+  duration: '60s'
+---
+# ============================================================
+# F03 —— order-service 网络延迟（级联影响上游 frontend）
+# 故障类型: NetworkChaos / delay
+# 真实根因: order-service
+# 预期现象: order P99 上升；frontend 因同步调用被拖慢
+# ============================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f03-net-delay-order
+  namespace: chaos-mesh
+  labels:
+    experiment-id: F03
+    ground-truth: order-service
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - demo-app
+    labelSelectors:
+      app: order
+  delay:
+    latency: '800ms'
+    correlation: '100'
+    jitter: '100ms'
+  duration: '120s'

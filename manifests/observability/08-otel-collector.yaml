@@ -1,0 +1,188 @@
+# ============================================================================
+# 08-otel-collector.yaml —— OpenTelemetry Collector（幂等）
+#
+# 位置：observability 命名空间
+# 作用：为全集群提供统一的 OTLP 接收端（gRPC 4317 / HTTP 4318），
+#       并把收到的日志转发到 Loki。后续 aiops 各组件（Go/Python）只需把
+#       OTLP 端点指向 otel-collector.observability.svc:4317 即可，无需各自适配后端。
+#
+# 【与上游默认配置的差异，重要】
+#   上游示例常见做法是给 Collector 配 filelog receiver 直接读 /var/log/pods。
+#   本集群**已经用 Promtail 采集容器文件日志**，如果再挂一份 filelog，
+#   同一份日志会以两套标签写入 Loki（job=promtail / job=otel），
+#   导致 Loki 存储翻倍、查询结果重复、日志量统计失真。
+#   因此这里**只启用 OTLP 管道**，文件日志仍由 Promtail 负责（单一数据源原则）。
+#   若将来要切到 OTel 统一采集，应先下线 Promtail 再放开 filelog，不要两者并存。
+#
+# 用法：在控制面执行  bash 12-deploy-otel-collector.sh
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector
+rules:
+  # k8sattributes processor 需要读取 Pod / Namespace / ReplicaSet / Node 元数据
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector
+subjects:
+  - { kind: ServiceAccount, name: otel-collector, namespace: observability }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+  labels: { app: otel-collector }
+data:
+  otel-collector.yml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http: { endpoint: 0.0.0.0:4318 }
+
+    processors:
+      # 防止 Collector 自身被大流量打爆：超过 65% 内存时开始拒绝新数据
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 65
+        spike_limit_percentage: 20
+      # 用 K8s API 元数据给每条记录补上 namespace / pod / node 等资源属性
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.container.name
+            - k8s.deployment.name
+            - k8s.node.name
+        pod_association:
+          - sources:
+              - { from: resource_attribute, name: k8s.pod.uid }
+          - sources:
+              - { from: resource_attribute, name: k8s.pod.name }
+      resource:
+        attributes:
+          - key: cluster
+            value: aisre-lab
+            action: upsert
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+
+    exporters:
+      loki:
+        endpoint: http://loki.observability.svc:3100/loki/api/v1/push
+        default_labels_enabled:
+          exporter: false
+          job: true
+      debug:
+        verbosity: basic
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs: { level: warn }
+        metrics: { level: none }
+      pipelines:
+        # 唯一的管道：OTLP 日志 -> Loki。没有 filelog（见文件头说明）。
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [loki]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels: { app: otel-collector, tier: observability }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: otel-collector }
+  template:
+    metadata:
+      labels: { app: otel-collector, tier: observability }
+    spec:
+      serviceAccountName: otel-collector
+      # 放在 k8s-ai 节点：AIOps 组件都在这一侧，减少跨节点跳数
+      nodeSelector: { kubernetes.io/hostname: k8s-ai }
+      containers:
+        - name: otel-collector
+          # 【为什么锁 0.113.0 而不是更新的 0.116.0】
+          # 0.116.0 这个镜像在本环境**起不来**，报：
+          #   libcontainer: container start initialization failed:
+          #   exec /otelcol-contrib: no such file or directory
+          # 二进制其实在镜像里（挂载后可见：308 MB，0755 可执行），
+          # 真正原因是它是**动态链接**的 ELF：
+          #   file 输出 -> dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2
+          # 而该镜像根文件系统只有 /etc/ssl/certs、/etc/otelcol-contrib、/otelcol-contrib，
+          # **没有 glibc 加载器**。内核 execve 找不到解释器时返回的就是 ENOENT，
+          # 于是报"文件不存在"，极易误判成"镜像拉取不完整"而反复重拉。
+          # 0.113.0 的二进制是静态链接，可正常运行：
+          #   otelcol-contrib version 0.113.0
+          # 验证方式（在节点上，不需要容器内有 shell）：
+          #   ctr -n k8s.io run --rm <img> probe /otelcol-contrib --version
+          image: docker.io/otel/opentelemetry-collector-contrib:0.113.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config=/etc/otelcol-contrib/otel-collector.yml"]
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+            - { name: health,    containerPort: 13133 }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - { name: config, mountPath: /etc/otelcol-contrib, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: otel-collector-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels: { app: otel-collector }
+spec:
+  selector: { app: otel-collector }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }
+    - { name: health,    port: 13133, targetPort: 13133 }

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-app
+  labels:
+    app.kubernetes.io/part-of: aisre-demo
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: demo-app-quota
+  namespace: demo-app
+spec:
+  hard:
+    # 【为什么上限给到 12 CPU / 12Gi 而不是贴着实际用量】
+    # Deployment 用的是 maxSurge=1 / maxUnavailable=0 的滚动更新：
+    # 更新期间会**同时存在**新旧各一个 Pod，配额必须留出这一份 surge 的空间。
+    # 最早把 limits.cpu 设成 6（刚好等于 6 个应用容器的 limits 之和），
+    # 结果滚动更新时新 Pod 直接被拒：
+    #   pods "frontend-..." is forbidden: exceeded quota: demo-app-quota,
+    #   requested: limits.cpu=800m, used: limits.cpu=5300m, limited: limits.cpu=6
+    # 表现是 Deployment 卡在 1/2，rs 里 desired=2 current=1 ready=1，迟迟不收敛。
+    requests.cpu: "4"
+    requests.memory: 6Gi
+    limits.cpu: "12"
+    limits.memory: 12Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: demo-app-limits
+  namespace: demo-app
+spec:
+  limits:
+    - type: Container
+      default:        { cpu: 300m, memory: 256Mi }
+      defaultRequest: { cpu: 50m,  memory: 64Mi }
