@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 用途 | 面试/汇报时的演示脚本：注入 → 降噪 → LLM RCA → 策略校验 → 自动执行 → SLI 恢复 → 审计留痕 |
+| 用途 | 汇报时的演示脚本：注入 → 降噪 → LLM RCA → 策略校验 → 自动执行 → SLI 恢复 → 审计留痕 |
 | 驱动脚本 | `scripts/28-selfheal-loop.sh`（两阶段，可重复执行） |
 | 观察窗口 | Grafana 三个盘（总览 / 业务 SLI / AIOps 自愈链路）+ Prometheus Alerts + Alertmanager |
 | 实测时长 | 从注入到完全恢复约 **7 分钟**（其中 5 分钟是 rate 窗口残留） |
